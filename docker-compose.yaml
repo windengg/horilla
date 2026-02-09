@@ -7,9 +7,11 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgres://postgres:postgres@db:5432/horilla"
+      CSRF_TRUSTED_ORIGINS: "https://hr.windengg.com"
+      ALLOWED_HOSTS: "windengg.com,hr.windengg.com,localhost,127.0.0.1,100.127.10.95,10.0.0.97"
     command: sh ./entrypoint.sh
     volumes:
-      - /volume1/docker/horilla/app:/app/horilla
+    #  - /volume1/docker/horilla/app:/app/horilla
       - /volume1/docker/horilla/media:/app/media
     depends_on:
       db:
