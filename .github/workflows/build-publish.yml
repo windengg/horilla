@@ -2,8 +2,15 @@ name: Build and Publish Multi-Arch Docker Image
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional custom tag (e.g. v2.0-beta) — if provided, skips both :latest and SHA tags'
+        required: false
+        type: string
+        default: ''
+
   push:
-    branches: [ main ]
+    branches: [ 1.0 ]
     paths-ignore:
       - "README.md"
       - ".github/**"
@@ -46,6 +53,19 @@ jobs:
         id: vars
         run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-6)" >> $GITHUB_OUTPUT
 
+      - name: Determine tagging strategy
+        id: tag_logic
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "use_custom_only=true" >> $GITHUB_OUTPUT
+            echo "include_latest=false" >> $GITHUB_OUTPUT
+            echo "include_sha=false" >> $GITHUB_OUTPUT
+          else
+            echo "use_custom_only=false" >> $GITHUB_OUTPUT
+            echo "include_latest=true" >> $GITHUB_OUTPUT
+            echo "include_sha=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
@@ -73,10 +93,12 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ${{ env.IMAGE_BASE_NAME }}:latest-${{ matrix.suffix }}
-            ${{ env.IMAGE_BASE_NAME }}:${{ steps.vars.outputs.short_sha }}-${{ matrix.suffix }}
-            ${{ env.GHCR_BASE_NAME }}:latest-${{ matrix.suffix }}
-            ${{ env.GHCR_BASE_NAME }}:${{ steps.vars.outputs.short_sha }}-${{ matrix.suffix }}
+            ${{ steps.tag_logic.outputs.include_latest == 'true' && format('{0}:latest-{1}', env.IMAGE_BASE_NAME, matrix.suffix) || '' }}
+            ${{ steps.tag_logic.outputs.include_sha == 'true' && format('{0}:{1}-{2}', env.IMAGE_BASE_NAME, steps.vars.outputs.short_sha, matrix.suffix) || '' }}
+            ${{ (steps.tag_logic.outputs.use_custom_only == 'true' || inputs.tag != '') && format('{0}:{1}-{2}', env.IMAGE_BASE_NAME, inputs.tag, matrix.suffix) || '' }}
+            ${{ steps.tag_logic.outputs.include_latest == 'true' && format('{0}:latest-{1}', env.GHCR_BASE_NAME, matrix.suffix) || '' }}
+            ${{ steps.tag_logic.outputs.include_sha == 'true' && format('{0}:{1}-{2}', env.GHCR_BASE_NAME, steps.vars.outputs.short_sha, matrix.suffix) || '' }}
+            ${{ (steps.tag_logic.outputs.use_custom_only == 'true' || inputs.tag != '') && format('{0}:{1}-{2}', env.GHCR_BASE_NAME, inputs.tag, matrix.suffix) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
@@ -95,6 +117,19 @@ jobs:
         id: vars
         run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-6)" >> $GITHUB_OUTPUT
 
+      - name: Determine tagging strategy (manifest)
+        id: tag_logic
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "use_custom_only=true" >> $GITHUB_OUTPUT
+            echo "include_latest=false" >> $GITHUB_OUTPUT
+            echo "include_sha=false" >> $GITHUB_OUTPUT
+          else
+            echo "use_custom_only=false" >> $GITHUB_OUTPUT
+            echo "include_latest=true" >> $GITHUB_OUTPUT
+            echo "include_sha=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
@@ -110,16 +145,34 @@ jobs:
 
       - name: Create and push multi-arch manifest (Docker Hub)
         run: |
-          docker buildx imagetools create \
-            --tag ${{ env.IMAGE_BASE_NAME }}:latest \
-            --tag ${{ env.IMAGE_BASE_NAME }}:${{ steps.vars.outputs.short_sha }} \
+          TAGS=""
+          if [ "${{ steps.tag_logic.outputs.include_latest }}" = "true" ]; then
+            TAGS="$TAGS --tag ${{ env.IMAGE_BASE_NAME }}:latest"
+          fi
+          if [ "${{ steps.tag_logic.outputs.include_sha }}" = "true" ]; then
+            TAGS="$TAGS --tag ${{ env.IMAGE_BASE_NAME }}:${{ steps.vars.outputs.short_sha }}"
+          fi
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAGS="$TAGS --tag ${{ env.IMAGE_BASE_NAME }}:${{ inputs.tag }}"
+          fi
+
+          docker buildx imagetools create $TAGS \
             ${{ env.IMAGE_BASE_NAME }}:latest-amd64 \
             ${{ env.IMAGE_BASE_NAME }}:latest-arm64
-            
+
       - name: Create and push multi-arch manifest (GHCR)
         run: |
-          docker buildx imagetools create \
-            --tag ${{ env.GHCR_BASE_NAME }}:latest \
-            --tag ${{ env.GHCR_BASE_NAME }}:${{ steps.vars.outputs.short_sha }} \
+          TAGS=""
+          if [ "${{ steps.tag_logic.outputs.include_latest }}" = "true" ]; then
+            TAGS="$TAGS --tag ${{ env.GHCR_BASE_NAME }}:latest"
+          fi
+          if [ "${{ steps.tag_logic.outputs.include_sha }}" = "true" ]; then
+            TAGS="$TAGS --tag ${{ env.GHCR_BASE_NAME }}:${{ steps.vars.outputs.short_sha }}"
+          fi
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAGS="$TAGS --tag ${{ env.GHCR_BASE_NAME }}:${{ inputs.tag }}"
+          fi
+
+          docker buildx imagetools create $TAGS \
             ${{ env.GHCR_BASE_NAME }}:latest-amd64 \
             ${{ env.GHCR_BASE_NAME }}:latest-arm64
