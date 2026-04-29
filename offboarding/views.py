@@ -20,9 +20,11 @@ from horilla.decorators import (
     hx_request_required,
     login_required,
     manager_can_enter,
+    owner_can_enter,
     permission_required,
 )
 from horilla.group_by import group_by_queryset as group_by
+from horilla.http.response import HorillaRedirect
 from horilla.methods import get_horilla_model_class
 from horilla_auth.models import HorillaUser
 from horilla_views.generic.cbv.views import HorillaFormView
@@ -249,7 +251,7 @@ def create_offboarding(request):
                 redirect=reverse("offboarding-pipeline"),
             )
 
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -309,7 +311,8 @@ def create_stage(request):
                 icon="people-circle",
                 redirect=reverse("offboarding-pipeline"),
             )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
+
     return render(request, "offboarding/stage/form.html", {"form": form})
 
 
@@ -319,7 +322,9 @@ def update_stage_order(request, pk):
     """
     This method is used to update the stage sequence of the offboarding
     """
-    offboarding = Offboarding.objects.get(id=pk)
+    offboarding = Offboarding.find(pk)
+    if not offboarding:
+        return HorillaRedirect(request, message=_("Offboarding not found"))
 
     if request.method == "POST":
         try:
@@ -387,7 +392,8 @@ def add_employee(request):
                     redirect=reverse("offboarding-pipeline"),
                     icon="information",
                 )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
+
     return render(request, "offboarding/employee/form.html", {"form": form})
 
 
@@ -436,7 +442,7 @@ def delete_stage(request):
             messages.error(request, _("Stage not found"))
     except OverflowError:
         messages.error(request, _("Stage not found"))
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -541,6 +547,7 @@ def change_offboarding_stage(request):
 
 @login_required
 @hx_request_required
+@owner_can_enter("view_offboardingnote", OffboardingNote)
 @any_manager_can_enter(
     "offboarding.view_offboardingnote", offboarding_employee_can_enter=True
 )
@@ -572,13 +579,18 @@ def view_notes(request, employee_id=None):
 
 
 @login_required
+@owner_can_enter("add_offboardingnote", OffboardingNote)
 # @any_manager_can_enter("offboarding.add_offboardingnote")
 def add_note(request):
     """
     This method is used to create note for the offboarding employee
     """
     employee_id = request.GET.get("employee_id")
-    employee = OffboardingEmployee.objects.get(id=employee_id)
+    if not employee_id:
+        return HorillaRedirect(request, message=_("Missing required parameter."))
+    employee = OffboardingEmployee.find(employee_id)
+    if not employee:
+        return HorillaRedirect(request, message=_("Employee not found."))
     form = NoteForm()
     if request.method == "POST":
         form = NoteForm(request.POST, request.FILES)
@@ -609,13 +621,12 @@ def offboarding_note_delete(request, note_id):
         note.delete()
         messages.success(request, _("The note has been successfully deleted."))
     except OffboardingNote.DoesNotExist:
-        messages.error(request, _("Note not found."))
-        script = "<script>window.location.reload()</script>"
-
+        return HorillaRedirect(request, message=_("Note not found."))
     return HttpResponse(script)
 
 
 @login_required
+@hx_request_required
 @permission_required("offboarding.delete_offboardingnote")
 def delete_attachment(request):
     """
@@ -679,6 +690,8 @@ def update_task_status(request, *args, **kwargs):
     employee_ids = request.GET.getlist("employee_ids")
     task_id = request.GET.get("task_id")
     status = request.GET.get("task_status")
+    if not task_id or not status or not stage_id or not employee_ids:
+        return HorillaRedirect(request, message=_("Missing required parameters."))
     employee_task = EmployeeTask.objects.filter(
         employee_id__id__in=employee_ids, task_id__id=task_id
     )
@@ -699,7 +712,9 @@ def update_task_status(request, *args, **kwargs):
         redirect=reverse("offboarding-pipeline"),
         icon="information",
     )
-    stage = OffboardingStage.objects.get(id=stage_id)
+    stage = OffboardingStage.find(stage_id)
+    if not stage:
+        return HorillaRedirect(request, message=_("Stage not found"))
     stage_forms = {}
     stage_forms[str(stage.offboarding_id.id)] = StageSelectForm(
         offboarding=stage.offboarding_id
@@ -727,7 +742,9 @@ def task_assign(request):
     employee_ids = request.GET.getlist("employee_ids")
     task_id = request.GET.get("task_id")
     employees = OffboardingEmployee.objects.filter(id__in=employee_ids)
-    task = OffboardingTask.objects.get(id=task_id)
+    task = OffboardingTask.find(task_id)
+    if not task:
+        return HorillaRedirect(request, message=_("Task not found"))
     for employee in employees:
         try:
             assigned_task = EmployeeTask()
@@ -772,6 +789,7 @@ def delete_task(request):
 
 @login_required
 @hx_request_required
+@owner_can_enter("view_employeetask", EmployeeTask)
 def offboarding_individual_view(request, emp_id):
     """
     This method is used to get the individual view of the offboarding employees
@@ -831,9 +849,12 @@ def request_view(request):
 
 
 @login_required
+@owner_can_enter("view_resignationletter", ResignationLetter)
 @permission_required("offboarding.view_resignationletter")
 def request_single_view(request, id):
-    letter = ResignationLetter.objects.get(id=id)
+    letter = ResignationLetter.find(id)
+    if not letter:
+        return HorillaRedirect(request, message=_("Resignation letter not found"))
     context = {
         "letter": letter,
     }
@@ -959,7 +980,8 @@ def create_resignation_request(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Resignation letter saved"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
+
     return render(request, "offboarding/resignation/form.html", {"form": form})
 
 
@@ -1073,6 +1095,7 @@ def enable_resignation_request(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("offboarding.add_offboardingemployee")
 def get_notice_period(request):
     """
@@ -1108,6 +1131,7 @@ def get_notice_period(request):
 
 
 @login_required
+@hx_request_required
 def get_notice_period_end_date(request):
     """
     Calculates and returns the end date of the notice period based on the provided start date.
@@ -1167,6 +1191,7 @@ def offboarding_dashboard(request):
 
 
 @login_required
+@hx_request_required
 @any_manager_can_enter(
     ["offboarding.view_offboarding", "offboarding.view_offboardingtask"]
 )
@@ -1188,6 +1213,7 @@ def dashboard_task_table(request):
 if apps.is_installed("asset"):
 
     @login_required
+    @hx_request_required
     @any_manager_can_enter(["offboarding.view_offboarding"])
     def dashboard_asset_table(request):
         """
@@ -1214,6 +1240,7 @@ if apps.is_installed("asset"):
 if apps.is_installed("pms"):
 
     @login_required
+    @hx_request_required
     @any_manager_can_enter("offboarding.view_offboarding")
     def dashboard_feedback_table(request):
         """

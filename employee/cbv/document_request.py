@@ -2,6 +2,7 @@
 This page handles the cbv methods for document request page
 """
 
+import os
 from typing import Any
 
 from django import forms
@@ -16,11 +17,12 @@ from base.methods import choosesubordinates, is_reportingmanager
 from employee.filters import DocumentPipelineFilter, DocumentRequestFilter
 from employee.models import Employee
 from horilla.decorators import manager_can_enter
+from horilla.http.response import HorillaRedirect
 from horilla_documents.forms import DocumentForm
 from horilla_documents.forms import DocumentRejectCbvForm as RejectForm
 from horilla_documents.forms import DocumentRequestForm, DocumentUpdateForm
 from horilla_documents.models import Document, DocumentRequest
-from horilla_views.cbv_methods import login_required
+from horilla_views.cbv_methods import hx_request_required, login_required
 from horilla_views.generic.cbv.pipeline import Pipeline
 from horilla_views.generic.cbv.views import (
     HorillaFormView,
@@ -28,6 +30,18 @@ from horilla_views.generic.cbv.views import (
     HorillaNavView,
 )
 from notifications.signals import notify
+
+BLOCKED_EXTENSIONS = {
+    ".html",
+    ".htm",
+    ".js",
+    ".svg",
+    ".xml",
+    ".php",
+    ".py",
+    ".sh",
+    ".exe",
+}
 
 
 @method_decorator(login_required, name="dispatch")
@@ -84,7 +98,8 @@ class DocumentRequestCreateForm(HorillaFormView):
                     icon="chatbox-ellipses",
                 )
                 form.save()
-            return self.HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(self.request)
+
         return super().form_valid(form)
 
 
@@ -106,11 +121,18 @@ class DocumentCreateForm(HorillaFormView):
         return initial
 
     def form_valid(self, form: DocumentForm) -> HttpResponse:
-        if form.is_valid():
-            messages.success(self.request, _("Document Uploaded Successfully"))
-            form.save()
-            return HttpResponse("<script>window.location.reload();</script>")
-        return super().form_valid(form)
+        uploaded_file = self.request.FILES.get("document")
+        if uploaded_file:
+            ext = os.path.splitext(uploaded_file.name)[1].lower()
+            if ext in BLOCKED_EXTENSIONS:
+                messages.error(
+                    self.request, _("File type %(ext)s is not allowed.") % {"ext": ext}
+                )
+                return HorillaRedirect(self.request)
+
+        form.save()
+        messages.success(self.request, _("Document Uploaded Successfully"))
+        return HorillaRedirect(self.request)
 
 
 @method_decorator(login_required, name="dispatch")
@@ -138,7 +160,8 @@ class DocumentRejectCbvForm(HorillaFormView):
                 messages.success(self.request, _("Document request rejected"))
             else:
                 messages.error(self.request, _("No document uploaded"))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(self.request)
+
         return super().form_valid(form)
 
 
@@ -166,6 +189,16 @@ class DocumentUploadForm(HorillaFormView):
         return context
 
     def form_valid(self, form: DocumentUpdateForm) -> HttpResponse:
+        uploaded_file = self.request.FILES.get("document")
+
+        if uploaded_file:
+            ext = os.path.splitext(uploaded_file.name)[1].lower()
+            if ext in BLOCKED_EXTENSIONS:
+                messages.error(
+                    self.request, _("File type %(ext)s is not allowed.") % {"ext": ext}
+                )
+                return HorillaRedirect(self.request)
+
         if form.is_valid():
             if form.instance.pk:
                 messages.success(self.request, _("Document uploaded successfully"))
@@ -184,14 +217,16 @@ class DocumentUploadForm(HorillaFormView):
                         ),
                         icon="chatbox-ellipses",
                     )
-                except:
+                except Exception:
                     pass
             form.instance.status = "requested"
             form.save()
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(self.request)
+
         return super().form_valid(form)
 
 
+@method_decorator(login_required, name="dispatch")
 class DocumentRequestNav(HorillaNavView):
     """
     For nav bar
@@ -249,6 +284,7 @@ class DocumentRequestNav(HorillaNavView):
     search_swap_target = "#view-container"
 
 
+@method_decorator(hx_request_required, name="dispatch")
 class DocumentRequestPipelineView(Pipeline):
     """
     Pipeline view for document request
@@ -293,6 +329,7 @@ class DocumentRequestPipelineView(Pipeline):
     ]
 
 
+@method_decorator(login_required, name="dispatch")
 class DocumentListView(HorillaListView):
     """
     List view for document request

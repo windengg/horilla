@@ -16,7 +16,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.core.paginator import Paginator
 from django.db.models import ProtectedError
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
@@ -71,6 +71,7 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.group_by import group_by_queryset
+from horilla.http.response import HorillaRedirect
 from horilla.methods import horilla_users_with_perms
 from notifications.signals import notify
 
@@ -133,20 +134,27 @@ def asset_creation(request, asset_category_id):
 
 
 @login_required
+@hx_request_required
 def add_asset_report(request, asset_id=None):
     """
     Function for adding asset report to the asset
     """
     asset_report_form = AssetReportForm()
     if asset_id:
-        asset = Asset.objects.get(id=asset_id)
+        asset = Asset.find(asset_id)
+        if not asset:
+            return HorillaRedirect(request, message=_("Asset not found"))
         asset_report_form = AssetReportForm(initial={"asset_id": asset})
         if not request.GET.get("asset_list"):
-            if request.user.employee_get == AssetAssignment.objects.get(
+            asset_assignment = AssetAssignment.objects.filter(
                 asset_id=asset_id, return_date__isnull=True
-            ).assigned_to_employee_id or request.user.has_perm("asset.change_asset"):
-                pass
-            else:
+            ).first()
+            if not (
+                asset_assignment
+                and request.user.employee_get
+                == asset_assignment.assigned_to_employee_id
+                or request.user.has_perm("asset.change_asset")
+            ):
                 return redirect(asset_request_allocation_view)
 
     if request.method == "POST":
@@ -198,7 +206,9 @@ def asset_update(request, asset_id):
     if not asset_under:
         # if asset there is no asset_under data that means the request is form the category list
         asset_under = "asset_category"
-    instance = Asset.objects.get(id=asset_id)
+    instance = Asset.find(asset_id)
+    if not instance:
+        return HorillaRedirect(request, message=_("Asset not found"))
     asset_form = AssetForm(instance=instance)
     previous_data = request.GET.urlencode()
 
@@ -227,6 +237,7 @@ def asset_update(request, asset_id):
 
 @login_required
 @hx_request_required
+@permission_required("asset.view_asset")
 def asset_information(request, asset_id):
     """
     Display information about a specific Asset object.
@@ -237,7 +248,9 @@ def asset_information(request, asset_id):
         A rendered HTML template displaying the information about the requested Asset object.
     """
 
-    asset = Asset.objects.get(id=asset_id)
+    asset = Asset.find(asset_id)
+    if not asset:
+        return HorillaRedirect(request, message=_("Asset not found"))
     context = {"asset": asset}
     requests_ids_json = request.GET.get("requests_ids")
     if requests_ids_json:
@@ -274,7 +287,7 @@ def asset_delete(request, asset_id):
         asset = Asset.objects.get(id=asset_id)
     except Asset.DoesNotExist:
         messages.error(request, _("Asset not found"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     asset_cat_id = asset.asset_category_id.id
     status = asset.asset_status
     asset_list_filter = request.GET.get("asset_list")
@@ -301,7 +314,7 @@ def asset_delete(request, asset_id):
             messages.error(request, _("Asset is used in allocation!."))
         else:
             asset_del(request, asset)
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     instances_ids = request.GET.get("requests_ids", "[]")
     instances_list = eval_validate(instances_ids)
@@ -331,7 +344,7 @@ def asset_delete(request, asset_id):
             )
 
         if len(eval_validate(instances_ids)) <= 1:
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
         if Asset.find(asset.id):
             return redirect(
@@ -548,6 +561,7 @@ def asset_category_view(request):
 
 
 @login_required
+@hx_request_required
 @permission_required(perm="asset.view_assetcategory")
 def asset_category_view_search_filter(request):
     """
@@ -675,7 +689,7 @@ def asset_request_approve(request, req_id):
                 )
 
                 messages.success(request, _("Asset request approved successfully!"))
-                return HttpResponse("<script>window.location.reload();</script>")
+                return HorillaRedirect(request)
             except Exception as e:
                 messages.error(request, _("An error occurred: ") + str(e))
                 return HttpResponse(error_response)
@@ -689,7 +703,7 @@ def asset_request_approve(request, req_id):
 
 def reject_request_return(request, asset_request, req_id):
     if not request.META.get("HTTP_HX_REQUEST"):
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     hx_target = request.META.get("HTTP_HX_TARGET")
     if hx_target == "objectDetailsModalW25Target":
@@ -738,7 +752,7 @@ def asset_request_reject(request, req_id):
         asset_request = AssetRequest.objects.get(id=req_id)
     except AssetRequest.DoesNotExist:
         messages.error(request, _("Asset request not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     asset_request.asset_request_status = "Rejected"
     asset_request.save()
@@ -797,6 +811,9 @@ def asset_allocate_creation(request):
 
 
 @login_required
+@owner_can_enter(
+    "change_assetassignment", AssetAssignment, employee_field="assigned_to_employee_id"
+)
 def asset_allocate_return_request(request, asset_id):
     """
     Handle the initiation of a return request for an allocated asset.
@@ -806,7 +823,7 @@ def asset_allocate_return_request(request, asset_id):
         asset_assign = AssetAssignment.objects.get(id=asset_id)
     except AssetAssignment.DoesNotExist:
         messages.error(request, _("Asset assignment not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     asset_assign.return_request = True
     asset_assign.save()
@@ -835,10 +852,11 @@ def asset_allocate_return_request(request, asset_id):
         url = reverse("asset-request-allocation-view-search-filter")
         return redirect(f"{url}?{previous_data}")
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
+@hx_request_required
 @permission_required(perm="asset.change_assetassignment")
 def asset_allocate_return(request, asset_id):
     """
@@ -858,13 +876,12 @@ def asset_allocate_return(request, asset_id):
 
         if asset_return_form.is_valid():
             asset = Asset.objects.filter(id=asset_id).first()
-            asset_return_status = request.POST.get("return_status")
-            asset_return_date = request.POST.get("return_date")
-            asset_return_condition = request.POST.get("return_condition")
+            asset_return_status = asset_return_form.cleaned_data["return_status"]
+            asset_return_date = asset_return_form.cleaned_data["return_date"]
+            asset_return_condition = asset_return_form.cleaned_data["return_condition"]
             files = request.FILES.getlist("return_images")
             attachments = []
             context = {"asset_return_form": asset_return_form, "asset_id": asset_id}
-            response = render(request, "asset/asset_return_form.html", context)
             if asset_return_status == "Healthy":
                 asset_allocation = AssetAssignment.objects.filter(
                     asset_id=asset_id, return_status__isnull=True
@@ -884,10 +901,7 @@ def asset_allocate_return(request, asset_id):
                 asset.asset_status = "Available"
                 asset.save()
                 messages.success(request, _("Asset Returned Successfully..."))
-                return HttpResponse(
-                    response.content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
             asset.asset_status = "Not-Available"
             asset.save()
             asset_allocation = AssetAssignment.objects.filter(
@@ -905,10 +919,7 @@ def asset_allocate_return(request, asset_id):
                     attachments.append(attachment)
                 asset_allocation.return_images.add(*attachments)
             messages.info(request, _("Asset Return Successful!."))
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
-
+            return HorillaRedirect(request)
     context = {"asset_return_form": asset_return_form, "asset_id": asset_id}
     context["asset_alocation"] = asset_allocation
     return render(request, "asset/asset_return_form.html", context)
@@ -1047,6 +1058,7 @@ def asset_request_allocation_view(request):
 
 
 @login_required
+@hx_request_required
 def asset_request_alloaction_view_search_filter(request):
     """
     This view handles the search and filter functionality for the asset request allocation list.
@@ -1070,6 +1082,11 @@ def asset_request_alloaction_view_search_filter(request):
 
 @login_required
 @hx_request_required
+@owner_can_enter(
+    "asset.view_assetassignment",
+    AssetAssignment,
+    employee_field="assigned_to_employee_id",
+)
 def own_asset_individual_view(request, asset_id):
     """
     This function is responsible for view the individual own asset
@@ -1078,7 +1095,9 @@ def own_asset_individual_view(request, asset_id):
         request : HTTP request object
         id (int): Id of the asset assignment
     """
-    asset_assignment = AssetAssignment.objects.get(id=asset_id)
+    asset_assignment = AssetAssignment.find(asset_id)
+    if not asset_assignment:
+        return HorillaRedirect(request, message=_("Asset assignment not found"))
     asset = asset_assignment.asset_id
     context = {
         "asset": asset,
@@ -1096,6 +1115,9 @@ def own_asset_individual_view(request, asset_id):
 
 @login_required
 @hx_request_required
+@owner_can_enter(
+    "asset.view_assetrequest", AssetRequest, employee_field="requested_employee_id"
+)
 def asset_request_individual_view(request, asset_request_id):
     """
     Display the details of an individual asset request.
@@ -1132,6 +1154,11 @@ def asset_request_individual_view(request, asset_request_id):
 
 @login_required
 @hx_request_required
+@owner_can_enter(
+    "asset.view_assetassignment",
+    AssetAssignment,
+    employee_field="assigned_to_employee_id",
+)
 def asset_allocation_individual_view(request, asset_allocation_id):
     """
     Display the details of an individual asset allocation.
@@ -1261,9 +1288,6 @@ def asset_import(request):
 
     Args:
         request (HttpRequest): The HTTP request object containing metadata about the request.
-
-    Returns:
-        HttpResponseRedirect: A redirect to the asset category view after processing the import.
     """
     if request.META.get("HTTP_HX_REQUEST"):
         return render(request, "asset/asset_import.html")
@@ -1591,6 +1615,7 @@ def asset_batch_number_search(request):
 
 
 @login_required
+@hx_request_required
 def asset_count_update(request):
     """
     View function to return update asset count at asset category.
@@ -1629,6 +1654,7 @@ def asset_dashboard(request):
 
 
 @login_required
+@hx_request_required
 @permission_required(perm="asset.view_assetrequest")
 def asset_dashboard_requests(request):
     """
@@ -1652,6 +1678,7 @@ def asset_dashboard_requests(request):
 
 
 @login_required
+@hx_request_required
 @permission_required(perm="asset.view_assetassignment")
 def asset_dashboard_allocates(request):
     asset_allocations = AssetAssignment.objects.filter(
@@ -1770,7 +1797,7 @@ def asset_history_single_view(request, asset_id):
         asset_assignment = AssetAssignment.objects.get(id=asset_id)
     except AssetAssignment.DoesNotExist:
         messages.error(request, _("Asset assignment not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     context = {"asset_assignment": asset_assignment}
     requests_ids_json = request.GET.get("requests_ids")
@@ -1788,6 +1815,7 @@ def asset_history_single_view(request, asset_id):
 
 
 @login_required
+@hx_request_required
 @permission_required(perm="asset.view_assetassignment")
 def asset_history_search(request):
     """
@@ -1855,7 +1883,7 @@ def asset_tab(request, pk):
         employee = Employee.objects.get(id=pk)
     except Employee.DoesNotExist:
         messages.error(request, _("Employee not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     assets_requests = employee.requested_employee.all()
     assets = employee.allocated_employee.all()
@@ -1873,6 +1901,7 @@ def asset_tab(request, pk):
 
 @login_required
 @hx_request_required
+@owner_can_enter("asset.view_assetassignment", Employee)
 def profile_asset_tab(request, emp_id):
     """
     This function is used to view asset tab of an employee in employee profile view.
@@ -1896,6 +1925,7 @@ def profile_asset_tab(request, emp_id):
 
 @login_required
 @hx_request_required
+@owner_can_enter("asset.view_assetrequest", Employee)
 def asset_request_tab(request, emp_id):
     """
     This function is used to view asset request tab of an employee in employee individual view.

@@ -71,7 +71,7 @@
                                                 type="checkbox"
                                                 value=""
                                                 class="bulk-list-table-row custom-checkbox w-4 h-4 bg-[#E9EDF7] rounded-sm text-primary-600 cursor-pointer"
-                                                title="Select All"
+                                                title="{% trans 'Select All' %}"
                                                 onchange="
                                                     $(this).closest('.fixed-table').find('.list-table-row').prop('checked',$(this).is(':checked')).change();
                                                     $(document).ready(function () {
@@ -124,7 +124,7 @@
                                     </th>
                                     {% endwith %}
                                 {% endfor %}
-                                {% if options or option_method%}
+                                {% if options or option_method %}
                                     <th class="text-sm font-medium min-w-[150px]" {{header_attrs.option|safe}}>
                                         <div class="p-3" {{header_attrs.option|safe}}>
                                             {% trans "Options" %}
@@ -153,7 +153,7 @@
                                             type="checkbox"
                                             class="list-table-row custom-checkbox w-4 h-4 bg-[#E9EDF7] rounded-sm text-primary-600 cursor-pointer"
                                             data-view-id="{{view_id|safe}}"
-                                            title="{% trans "Select Row" %}"
+                                            title="{% trans 'Select Row' %}"
                                             value = "{{instance.pk}}"
                                             onclick="
                                                 event.stopPropagation();
@@ -174,18 +174,19 @@
                                     {% endif %}
                                     {% for cell in columns %}
                                         {% with attribute=cell.1 index=forloop.counter %}
-                                            <td class="text-sm text-left p-3 text-[#666] h-[45px]">
+                                            <td class="text-sm text-left p-3 text-[#666] h-[45px] max-w-0">
                                                 {% if not cell.2 %}
                                                     <div class="truncate">
                                                         {{instance|getattribute:attribute|selected_format:request.user.employee_get.employee_work_info.company_id|safe}}
                                                     </div>
                                                 {% else %}
-                                                    <div class="oh-profile oh-profile--md min-w-[200px] justify-normal">
+                                                    <div class="oh-profile oh-profile--md w-full justify-normal">
                                                         <div class="oh-profile__avatar mr-1">
                                                             <img
                                                                 src="{{instance|getattribute:cell.2}}"
+                                                                data-src="{{instance|getattribute:cell.2}}"
                                                                 alt=""
-                                                                class="oh-profile__image oh-table-img"
+                                                                class="oh-profile__image oh-table-img avatar-thumb"
                                                                 width="30"
                                                             />
                                                         </div>
@@ -280,7 +281,17 @@
                                     <i class="fa-solid fa-arrow-left"></i>
                                 </button>
                             {% endif %}
-                            {{ queryset.number }} / {{ queryset.paginator.num_pages }}
+                            <div>
+                                <input
+                                    type="number"
+                                    name="page"
+                                    class="w-[30px]"
+                                    value="{{queryset.number}}"
+                                    hx-get="{{search_url}}?{{request.GET.urlencode}}"
+                                    hx-target="#{{view_id}}"
+                                    min="1"
+                                /> / {{ queryset.paginator.num_pages }}
+                            </div>
                             {% if queryset.has_next %}
                                 <button
                                     class="text-xs hover:text-primary-600 transition duration-300"
@@ -378,7 +389,7 @@
     setTimeout(() => {
       $("#{{view_id}} [type=checkbox].list-table-row:checked").first().change();
       $("#{{view_id}} [type=checkbox].list-table-row:checked").not().first().change();
-      var ids = JSON.parse($("#{{selected_instances_key_id}}").attr("data-ids"))
+      var ids = JSON.parse($("#selectedInstances").attr("data-ids") || "[]");
       if (ids.length) {
         $("#{{view_id}} .quick-bulk-action.d-none").removeClass("d-none");
       }

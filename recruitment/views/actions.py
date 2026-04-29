@@ -10,7 +10,7 @@ from django import template
 from django.contrib import messages
 from django.contrib.auth.models import Permission
 from django.db.models import ProtectedError
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
@@ -18,8 +18,9 @@ from django.views.decorators.http import require_http_methods
 
 from base.models import HorillaMailTemplate
 from employee.models import Employee
-from horilla.decorators import login_required, permission_required
+from horilla.decorators import hx_request_required, login_required, permission_required
 from horilla.group_by import group_by_queryset
+from horilla.http import HorillaRedirect
 from notifications.signals import notify
 from recruitment.decorators import (
     candidate_login_required,
@@ -47,7 +48,7 @@ def recruitment_delete(request, rec_id):
             recruitment_obj = Recruitment.objects.get(id=rec_id)
         except Recruitment.DoesNotExist:
             messages.error(request, _("Recruitment not found."))
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(request)
         recruitment_mangers = recruitment_obj.recruitment_managers.all()
         all_stage_permissions = Permission.objects.filter(
             content_type__app_label="recruitment", content_type__model="stage"
@@ -91,7 +92,7 @@ def recruitment_delete(request, rec_id):
         recruitment_obj = Recruitment.objects.all()
     except (Recruitment.DoesNotExist, OverflowError):
         messages.error(request, _("Recruitment Does not exists.."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -103,7 +104,7 @@ def recruitment_delete_pipeline(request, rec_id):
     Args:
         id: recruitment instance id
     Returns:
-        HttpResponseRedirect: Used to refresh the page
+        HorillaRedirect: Used to refresh the page
     """
     try:
         recruitment_obj = Recruitment.objects.get(id=rec_id)
@@ -120,7 +121,7 @@ def recruitment_delete_pipeline(request, rec_id):
             request,
             _("Recruitment already in use for {}.".format(models_verbose_name_str)),
         )
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -136,8 +137,7 @@ def note_delete(request, note_id):
         messages.success(request, _("Note deleted"))
         script = ""
     except StageNote.DoesNotExist:
-        messages.error(request, _("Note not found."))
-        script = "<script>window.location.reload()</script>"
+        return HorillaRedirect(request, message=_("Note not found."))
     except ProtectedError:
         messages.error(request, _("You cannot delete this note."))
         script = f"""
@@ -147,16 +147,20 @@ def note_delete(request, note_id):
 
 
 @candidate_login_required
+@hx_request_required
 # @manager_can_enter(perm="recruitment.delete_stagenote")
 def note_delete_individual(request, note_id):
     """
     This method is used to delete the stage note
     """
-    script = ""
-    note = StageNote.objects.get(id=note_id)
-    note.delete()
-    messages.success(request, _("Note deleted."))
-    return HttpResponse(script)
+    note = StageNote.find(note_id)
+    note.delete() if note else None
+    (
+        messages.success(request, _("Note deleted."))
+        if note
+        else messages.error(request, _("No Stage Note found matching the query."))
+    )
+    return HttpResponse("")
 
 
 @login_required
@@ -174,7 +178,7 @@ def stage_delete(request, stage_id):
             recruitment_id = stage_obj.recruitment_id.id
         except Stage.DoesNotExist:
             messages.error(request, _("Stage not found."))
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(request)
 
         stage_managers = stage_obj.stage_managers.all()
         for manager in stage_managers:
@@ -211,7 +215,7 @@ def stage_delete(request, stage_id):
     hx_current_url = request.META.get("HTTP_HX_CURRENT_URL")
     if hx_request and hx_request == "true" and "stage-view" in hx_current_url:
         return redirect(f"/recruitment/stage-data/{recruitment_id}/")
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -244,7 +248,7 @@ def candidate_delete(request, cand_id):
             )
     except (Candidate.DoesNotExist, OverflowError):
         messages.error(request, _("Candidate Does not exists."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -287,7 +291,7 @@ def candidate_archive(request, cand_id):
         messages.success(request, _("Candidate is %(message)s") % {"message": message})
     except (Candidate.DoesNotExist, OverflowError):
         messages.error(request, _("Candidate Does not exists."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -327,8 +331,15 @@ def remove_stage_manager(request, mid, sid):
         mid : manager_id in the stage
         sid : stage_id
     """
-    stage_obj = Stage.objects.get(id=sid)
-    manager = Employee.objects.get(id=mid)
+    stage_obj = Stage.find(sid)
+    manager = Employee.objects.filter(id=mid).first()
+    if not stage_obj or not manager:
+        return HorillaRedirect(
+            request,
+            message=_("No %(model_name)s found matching the query.")
+            % {"model_name": "Stage" if not stage_obj else "Employee"},
+        )
+
     notify.send(
         request.user.employee_get,
         recipient=manager.employee_user_id,
@@ -415,7 +426,14 @@ def get_template(request, obj_id=None):
     """
     body = ""
     if obj_id:
-        body = HorillaMailTemplate.objects.get(id=obj_id).body
+        body = (
+            HorillaMailTemplate.find(obj_id).body
+            if HorillaMailTemplate.find(obj_id)
+            else None
+        )
+        if not body:
+            return JsonResponse({"body": None})
+
         template_bdy = template.Template(body)
     if request.GET.get("word"):
         word = request.GET.get("word")

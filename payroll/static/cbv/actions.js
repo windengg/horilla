@@ -42,7 +42,7 @@ function DeleteContractBulk() {
 
                 $.ajax({
                     type: "POST",
-                    url: "/payroll/contract-bulk-delete",
+                    url: "/payroll/contract-bulk-delete/",
                     data: {
                         csrfmiddlewaretoken: getCookie("csrftoken"),
                         ids: JSON.stringify(ids),
@@ -54,6 +54,9 @@ function DeleteContractBulk() {
                             // console.log("Unexpected HTTP status:", jqXHR.status);
                         }
                     },
+                    error: () => {
+                        reloadmessage()
+                    }
                 });
             }
         });

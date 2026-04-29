@@ -18,6 +18,7 @@ from helpdesk.filter import TicketTypeFilter
 from helpdesk.forms import TicketForm, TicketTypeForm
 from helpdesk.models import Attachment, Ticket, TicketType
 from helpdesk.threading import TicketSendThread
+from horilla.http.response import HorillaRedirect
 from horilla_views.cbv_methods import login_required, permission_required
 from horilla_views.generic.cbv.views import (
     HorillaFormView,
@@ -98,8 +99,8 @@ class TicketsListView(HorillaListView):
     ]
 
     row_attrs = """
-                id="ticketTypeTr{get_delete_instance}"
-                """
+        id="ticketTypeTr{get_delete_instance}"
+    """
 
 
 @method_decorator(login_required, name="dispatch")
@@ -113,12 +114,12 @@ class TicketsNavView(HorillaNavView):
         super().__init__(**kwargs)
         self.search_url = reverse("ticket-list")
         self.create_attrs = f"""
-                            onclick = "event.stopPropagation();"
-                            data-toggle="oh-modal-toggle"
-                            data-target="#genericModal"
-                            hx-target="#genericModalBody"
-                            hx-get="{reverse('ticket-create-form')}"
-                            """
+            onclick = "event.stopPropagation();"
+            data-toggle="oh-modal-toggle"
+            data-target="#genericModal"
+            hx-target="#genericModalBody"
+            hx-get="{reverse('ticket-create-form')}"
+        """
 
     nav_title = _("Ticket Type")
     search_swap_target = "#listContainer"
@@ -209,6 +210,19 @@ class TicketsCreateFormView(HorillaFormView):
         context["form"] = self.form
         return context
 
+    def dispatch(self, request, *args, **kwargs):
+        pk = kwargs.get("pk")
+        if pk:
+            ticket = Ticket.objects.filter(id=pk).first()
+            if ticket:
+                employee = ticket.employee_id
+                is_owner = request.user.employee_get == employee
+                has_perm = request.user.has_perm("helpdesk.change_ticket")
+                if not (is_owner or has_perm):
+                    messages.error(request, _("You don't have permission."))
+                    return HorillaRedirect(request)
+        return super().dispatch(request, *args, **kwargs)
+
     def form_valid(self, form: TicketForm) -> HttpResponse:
         if form.is_valid():
             if not form.instance.pk:
@@ -281,6 +295,6 @@ class TicketsCreateFormView(HorillaFormView):
                 ticket = form.save()
                 messages.success(self.request, _("The Ticket updated successfully."))
 
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(self.request)
 
         return super().form_valid(form)

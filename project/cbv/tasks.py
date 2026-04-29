@@ -16,6 +16,8 @@ from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
 
 from base.methods import get_subordinates
+from horilla.http import HorillaRedirect
+from horilla.methods import handle_no_permission
 from horilla_views.cbv_methods import login_required
 from horilla_views.generic.cbv.views import (
     HorillaCardView,
@@ -29,7 +31,6 @@ from project.cbv.project_stage import StageDynamicCreateForm
 from project.cbv.projects import DynamicProjectCreationFormView
 from project.filters import TaskAllFilter
 from project.forms import TaskAllForm
-from project.methods import you_dont_have_permission
 from project.models import Project, ProjectStage, Task
 from project.templatetags.taskfilters import task_crud_perm
 
@@ -276,12 +277,26 @@ class TaskCreateForm(HorillaFormView):
         project_id = self.kwargs.get("project_id")
         stage_id = self.kwargs.get("stage_id")
         task_id = self.kwargs.get("pk")
+        if not task_id and not Project.objects.exists():
+            messages.error(request, _("Please create a project first."))
+            return HorillaRedirect(request)
+
         if project_id:
             project = Project.objects.filter(id=project_id).first()
+            if not project:
+                messages.error(request, _("Project not found."))
+                return HorillaRedirect(request)
         elif stage_id:
-            project = ProjectStage.objects.filter(id=stage_id).first().project
+            stage = ProjectStage.objects.filter(id=stage_id).first()
+            if not stage:
+                messages.error(request, _("Stage not found."))
+                return HorillaRedirect(request)
+            project = stage.project
         elif task_id:
             task = Task.objects.filter(id=task_id).first()
+            if not task:
+                messages.error(request, _("Task not found."))
+                return HorillaRedirect(request)
             project = task.project
         elif not task_id:
             return super().get(request, *args, pk=pk, **kwargs)
@@ -300,7 +315,7 @@ class TaskCreateForm(HorillaFormView):
                 return super().get(request, *args, pk=pk, **kwargs)
 
         else:
-            return you_dont_have_permission(request)
+            return handle_no_permission(request)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -381,7 +396,7 @@ class TaskCreateForm(HorillaFormView):
             form.save()
             messages.success(self.request, _(message))
             if stage_id or self.request.GET.get("project_task"):
-                return HttpResponse("<script>location.reload();</script>")
+                return HorillaRedirect(self.request)
             return self.HttpResponse("<script>$('#applyFilter').click();</script>")
         return super().form_valid(form)
 

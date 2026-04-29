@@ -9,10 +9,11 @@ from django.conf import settings
 from django.contrib import messages
 from django.core import serializers
 from django.db.models import ProtectedError
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext as _
 from django.views.decorators.http import require_http_methods
 
@@ -26,7 +27,7 @@ from base.methods import (
     sortby,
 )
 from base.models import Department, JobPosition, Tags
-from employee.models import Employee
+from employee.models import Employee, EmployeeWorkInformation
 from employee.views import get_content_type
 from helpdesk.decorators import ticket_owner_can_enter
 from helpdesk.filter import (
@@ -65,9 +66,12 @@ from horilla.decorators import (
     hx_request_required,
     login_required,
     manager_can_enter,
+    owner_can_enter,
     permission_required,
 )
 from horilla.group_by import group_by_queryset
+from horilla.http.response import HorillaRedirect
+from horilla.methods import handle_no_permission
 from notifications.signals import notify
 
 BLOCKED_EXTENSIONS = {
@@ -85,10 +89,6 @@ BLOCKED_EXTENSIONS = {
 logger = logging.getLogger(__name__)
 
 # Create your views here.
-
-
-def strtobool(val):
-    return str(val).lower() in ("y", "yes", "t", "true", "on", "1")
 
 
 def strtobool(val):
@@ -182,9 +182,14 @@ def faq_category_delete(request, id):
         faq.delete()
         messages.success(request, _("The FAQ category has been deleted successfully."))
         return HttpResponse("")
+
+    except FAQCategory.DoesNotExist:
+        message = _("No FAQ category found matching the query.")
+
     except ProtectedError:
-        messages.error(request, _("You cannot delete this FAQ category."))
-    return HttpResponse("<script>window.location.reload()</script>")
+        message = _("You cannot delete this FAQ category.")
+
+    return HorillaRedirect(request, message=message)
 
 
 @login_required
@@ -372,6 +377,7 @@ def faq_filter(request, id):
 
 
 @login_required
+@hx_request_required
 def faq_suggestion(request):
     faqs = FAQFilter(request.GET).qs
     data_list = list(faqs.values())
@@ -386,15 +392,19 @@ def faq_suggestion(request):
 def faq_delete(request, id):
     try:
         faq = FAQ.objects.get(id=id)
-        cat_id = faq.category.id
         faq.delete()
         messages.success(
             request, _('The FAQ "{}" has been deleted successfully.').format(faq)
         )
         return HttpResponse("")
+
+    except FAQ.DoesNotExist:
+        message = _("No FAQ found matching the query.")
+
     except ProtectedError:
-        messages.error(request, _("You cannot delete this FAQ."))
-    return HttpResponse("<script>window.location.reload()</script>")
+        messages = _("You cannot delete this FAQ.")
+
+    return HorillaRedirect(request, message=message)
 
 
 @login_required
@@ -512,7 +522,7 @@ def ticket_create(request):
                 icon="infinite",
                 redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
             )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {
         "form": form,
         "t_type_form": TicketTypeForm(),
@@ -551,7 +561,7 @@ def ticket_update(request, ticket_id):
                     attachment_instance = Attachment(file=attachment, ticket=ticket)
                     attachment_instance.save()
                 messages.success(request, _("The Ticket updated successfully."))
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         context = {
             "form": form,
             "ticket_id": ticket_id,
@@ -559,17 +569,7 @@ def ticket_update(request, ticket_id):
         }
         return render(request, "helpdesk/ticket/ticket_form.html", context)
     else:
-        messages.info(request, _("You don't have permission."))
-
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return handle_no_permission(request)
 
 
 @login_required
@@ -584,7 +584,11 @@ def ticket_archive(request, ticket_id):
         return Ticket view
     """
 
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
 
     # Check if the user has permission or is the employee or their reporting manager
     if (
@@ -597,28 +601,19 @@ def ticket_archive(request, ticket_id):
         ticket.is_active = not ticket.is_active
         ticket.save()
 
-        if ticket.is_active:
-            messages.success(request, _("The Ticket un-archived successfully."))
-        else:
-            messages.success(request, _("The Ticket archived successfully."))
+        messsage = (
+            _("The Ticket un-archived successfully.")
+            if ticket.is_active
+            else _("The Ticket archived successfully.")
+        )
+        messages.success(request, messsage)
 
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
-
-    else:
-        messages.info(request, _("You don't have permission."))
-
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return HorillaRedirect(request)
+    return handle_no_permission(request)
 
 
 @login_required
+@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def ticket_status_change(request, ticket_id):
     if request.method != "POST":
         messages.error(request, _("Invalid request method."))
@@ -659,6 +654,7 @@ def ticket_status_change(request, ticket_id):
 
 
 @login_required
+@hx_request_required
 # @ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def change_ticket_status(request, ticket_id):
     """
@@ -671,17 +667,23 @@ def change_ticket_status(request, ticket_id):
     Returns:
         return Ticket view
     """
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        response = {
+            "type": "danger",
+            "message": _("No Ticket found matching the query."),
+        }
+        return JsonResponse(response)
+
     pre_status = ticket.get_status_display()
     status = request.POST.get("status")
     user = request.user.employee_get
-    response = {}
-    if ticket.status != status:
-        if (
-            user == ticket.employee_id
-            or user in ticket.assigned_to.all()
-            or request.user.has_perm("helpdesk.change_ticket")
-        ):
+    if (
+        user == ticket.employee_id
+        or user in ticket.assigned_to.all()
+        or request.user.has_perm("helpdesk.change_ticket")
+    ):
+        if ticket.status != status:
             ticket.status = status
             ticket.save()
             time = datetime.now()
@@ -720,14 +722,15 @@ def change_ticket_status(request, ticket_id):
                 type="status_change",
             )
             mail_thread.start()
-        else:
-            response = {
-                "type": "danger",
-                "message": _("You Don't have the permission."),
-            }
 
-    if ticket.status == "resolved":
-        ticket.resolved_date = datetime.today()
+        if ticket.status == "resolved":
+            ticket.resolved_date = datetime.today()
+    else:
+        response = {
+            "type": "danger",
+            "message": _("You Don't have the permission."),
+        }
+
     return JsonResponse(response)
 
 
@@ -782,7 +785,7 @@ def ticket_delete(request, ticket_id):
             messages.error(request, _('The ticket is not in the "New" status'))
     except ProtectedError:
         messages.error(request, _("You cannot delete this Ticket."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 def get_allocated_tickets(request):
@@ -914,7 +917,12 @@ def ticket_filter(request):
 
 @login_required
 def ticket_detail(request, ticket_id, **kwargs):
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     if (
         request.user.has_perm("helpdesk.view_ticket")
         or ticket.employee_id.get_reporting_manager() == request.user.employee_get
@@ -948,9 +956,7 @@ def ticket_detail(request, ticket_id, **kwargs):
         color = "success"
         remaining_days = ticket.deadline - today
         remaining = f"Due in {remaining_days.days} days"
-        if ticket.status == "resolved":
-            remaining = "Resolved"
-        elif remaining_days.days < 0:
+        if remaining_days.days < 0:
             remaining = f"{abs(remaining_days.days)} days overdue"
             color = "danger"
         elif remaining_days.days == 0:
@@ -986,21 +992,17 @@ def ticket_detail(request, ticket_id, **kwargs):
         }
         return render(request, "helpdesk/ticket/ticket_detail.html", context=context)
     else:
-        messages.info(request, _("You don't have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return handle_no_permission(request)
 
 
 @login_required
 def ticket_individual_view(request, ticket_id):
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     context = {
         "ticket": ticket,
     }
@@ -1011,7 +1013,12 @@ def ticket_individual_view(request, ticket_id):
 
 @login_required
 def view_ticket_claim_request(request, ticket_id):
-    ticket = Ticket.objects.filter(id=ticket_id).first()
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     if (
         request.user.has_perm("helpdesk.change_claimrequest")
         or request.user.has_perm("helpdesk.view_claimrequest")
@@ -1024,16 +1031,7 @@ def view_ticket_claim_request(request, ticket_id):
         }
         return render(request, "helpdesk/ticket/ticket_claim_requests.html", context)
     else:
-        messages.info(request, _("You don't have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return handle_no_permission(request)
 
 
 @login_required
@@ -1042,7 +1040,12 @@ def ticket_update_tag(request):
     method to update the tags of ticket
     """
     data = request.GET
-    ticket = Ticket.objects.get(id=data.get("ticketId"))
+    ticket = Ticket.find(data.get("ticketId"))
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     if (
         request.user.has_perm("helpdesk.view_ticket")
         or request.user.employee_get == ticket.employee_id
@@ -1059,16 +1062,7 @@ def ticket_update_tag(request):
         }
         return JsonResponse(response)
     else:
-        messages.info(request, _("You don't have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return handle_no_permission(request)
 
 
 @login_required
@@ -1085,23 +1079,14 @@ def ticket_change_raised_on(request, ticket_id):
             if form.is_valid():
                 form.save()
                 messages.success(request, _("Responsibility updated for the Ticket"))
-                return HttpResponse("<script>window.location.reload()</script>")
+                return redirect(ticket_detail, ticket_id=ticket_id)
         return render(
             request,
             "helpdesk/ticket/forms/change_raised_on.html",
             {"form": form, "ticket_id": ticket_id},
         )
     else:
-        messages.info(request, _("You don't have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return handle_no_permission(request)
 
 
 @login_required
@@ -1142,7 +1127,7 @@ def ticket_change_assignees(request, ticket_id):
                 mail_thread.start()
 
                 messages.success(request, _("Assinees updated for the Ticket"))
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
         return render(
             request,
@@ -1150,16 +1135,7 @@ def ticket_change_assignees(request, ticket_id):
             {"form": form, "ticket_id": ticket_id},
         )
     else:
-        messages.info(request, _("You don't have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return handle_no_permission(request)
 
 
 @login_required
@@ -1186,6 +1162,7 @@ def create_tag(request):
 
 
 @login_required
+@hx_request_required
 def remove_tag(request):
     """
     This is an ajax method to  remove tag from a ticket.
@@ -1208,8 +1185,29 @@ def remove_tag(request):
     return JsonResponse({"message": message, "type": type})
 
 
+def can_access_ticket(request, ticket):
+    """
+    Check if the current user is authorized to access the given ticket.
+    """
+    if ticket is None:
+        return False
+    employee = request.user.employee_get
+    return (
+        request.user.has_perm("helpdesk.view_ticket")
+        or employee == ticket.employee_id
+        or employee in ticket.assigned_to.all()
+        or ticket.employee_id.get_reporting_manager() == employee
+        or is_department_manager(request, ticket)
+        or (
+            ticket.assigning_type == "individual"
+            and employee == ticket.get_raised_on_object()
+        )
+    )
+
+
 @login_required
 @hx_request_required
+@ticket_owner_can_enter(perm="helpdesk.view_ticket", model=Ticket)
 def view_ticket_document(request, doc_id):
     """
     This function used to view the uploaded document in the modal.
@@ -1221,7 +1219,20 @@ def view_ticket_document(request, doc_id):
     Returns: return view_file template
     """
 
-    document_obj = Attachment.objects.filter(id=doc_id).first()
+    document_obj = Attachment.find(doc_id)
+    if document_obj is None:
+        return HorillaRedirect(
+            request, message=_("No Attachment found matching the query.")
+        )
+
+    ticket = document_obj.ticket or (
+        document_obj.comment.ticket if document_obj.comment else None
+    )
+    if not can_access_ticket(request, ticket):
+        return HorillaRedirect(
+            request, message=_("You do not have permission to view the documents.")
+        )
+
     context = {
         "document": document_obj,
     }
@@ -1245,6 +1256,7 @@ def view_ticket_document(request, doc_id):
 
 @login_required
 @hx_request_required
+@ticket_owner_can_enter(perm="helpdesk.view_ticket", model=Ticket)
 def delete_ticket_document(request, doc_id):
     """
     This function used to delete the uploaded document in the modal.
@@ -1254,12 +1266,28 @@ def delete_ticket_document(request, doc_id):
     id (int): The id of the document.
 
     """
-    Attachment.objects.get(id=doc_id).delete()
+    document_obj = Attachment.find(doc_id)
+    if document_obj is None:
+        return HorillaRedirect(
+            request, message=_("No Attachment found matching the query.")
+        )
+
+    ticket = document_obj.ticket or (
+        document_obj.comment.ticket if document_obj.comment else None
+    )
+    if not can_access_ticket(request, ticket):
+        return HorillaRedirect(
+            request, message=_("You do not have permission to delete the documents.")
+        )
+
+    document_obj.delete()
     messages.success(request, _("Document has been deleted."))
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
+@hx_request_required
+@ticket_owner_can_enter(perm="helpdesk.add_comment", model=Ticket)
 def comment_create(request, ticket_id):
     """
     This method is used to create comment to a ticket
@@ -1273,33 +1301,31 @@ def comment_create(request, ticket_id):
             files = request.FILES.getlist("file")
 
             valid_files = []
-            blocked_found = False
+            blocked_files = []
 
             for file in files:
                 ext = os.path.splitext(file.name)[1].lower()
                 if ext in BLOCKED_EXTENSIONS:
-                    blocked_found = True
+                    blocked_files.append(ext)
                 else:
                     valid_files.append(file)
 
-            # stop here
+            # NOTHING valid → do NOT create comment
             if not comment_text and not valid_files:
-                if blocked_found:
+                if blocked_files:
                     messages.error(
-                        request, f"File type {ext} is not allowed for security reasons."
+                        request,
+                        _("File type(s) %(ext)s are not allowed.")
+                        % {"ext": ", ".join(set(blocked_files))},
                     )
                 else:
                     messages.error(
                         request, _("Please add a comment or upload at least one file.")
                     )
-                return HttpResponse(
-                    "<script>"
-                    "$('.reload-record').click();"
-                    "$('#reloadMessagesButton').click();"
-                    "</script>"
-                )
 
-            # Now safe to create comment
+                return redirect(ticket_detail, ticket_id=ticket_id)
+
+            # NOW it's safe to create comment
             comment = c_form.save(commit=False)
             comment.employee_id = request.user.employee_get
             comment.ticket = ticket
@@ -1315,19 +1341,29 @@ def comment_create(request, ticket_id):
             messages.success(request, _("A new comment has been created."))
 
     return HttpResponse(
-        "<script>"
-        "$('.reload-record').click();"
-        "$('#reloadMessagesButton').click();"
-        "</script>"
+        "<script>$('.reload-record').click();$('#reloadMessagesButton').click();</script>"
     )
 
 
 @login_required
+@hx_request_required
 def comment_edit(request):
     comment_id = request.GET.get("comment_id")
     new_comment = request.POST.get("new_comment")
+
     if new_comment and len(new_comment) > 1:
         comment = Comment.objects.get(id=comment_id)
+
+        if not (
+            request.user.has_perm("helpdesk.change_claimrequest")
+            or request.user.has_perm("helpdesk.change_ticket")
+            or comment.ticket.employee_id == request.user.employee_get
+            or is_department_manager(request, comment.ticket)
+        ):
+            return HttpResponse(
+                "<script>$('.reload-record').click();$('#reloadMessagesButton').click();</script>"
+            )
+
         comment.comment = new_comment
         comment.save()
         messages.success(request, _("The comment updated successfully."))
@@ -1337,6 +1373,7 @@ def comment_edit(request):
     response = {
         "errors": "no_error",
     }
+
     return HttpResponse(
         "<script>$('.reload-record').click();$('#reloadMessagesButton').click();</script>"
     )
@@ -1345,15 +1382,18 @@ def comment_edit(request):
 @login_required
 @permission_required("helpdesk.delete_comment")
 def comment_delete(request, comment_id):
-    comment = Comment.objects.filter(id=comment_id).first()
+    comment = Comment.find(comment_id)
+    if not comment:
+        return HorillaRedirect(
+            request, message=_("No Comment found matching the query.")
+        )
+
     employee = comment.employee_id
     comment.delete()
     messages.success(
         request, _("{}'s comment has been deleted successfully.").format(employee)
     )
-    return HttpResponse(
-        "<script>$('.reload-record').click();$('#reloadMessagesButton').click();</script>"
-    )
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1396,15 +1436,21 @@ def claim_ticket(request, id):
     """
     This is a function to create a claim request for requested employee
     """
-    ticket = Ticket.objects.get(id=id)
+    ticket = Ticket.find(id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     if not ClaimRequest.objects.filter(
         employee_id=request.user.employee_get, ticket_id=ticket
     ).exists():
         ClaimRequest(employee_id=request.user.employee_get, ticket_id=ticket).save()
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
+@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def approve_claim_request(request, req_id):
     """
     Function for approve claim request and send notifications to the responsibles.
@@ -1412,6 +1458,13 @@ def approve_claim_request(request, req_id):
     claim_request = ClaimRequest.objects.filter(id=req_id).first()
     if not claim_request:
         return HttpResponse("Invalid claim request", status=404)
+
+    if not (
+        request.user.has_perm("helpdesk.change_claimrequest")
+        or request.user.has_perm("helpdesk.change_ticket")
+        or is_department_manager(request, ticket)
+    ):
+        handle_no_permission(request)
 
     approve = strtobool(
         request.GET.get("approve", "False")
@@ -1504,6 +1557,7 @@ def approve_claim_request(request, req_id):
 
 
 @login_required
+@hx_request_required
 def tickets_select_filter(request):
     """
     This method is used to return all the ids of the filtered tickets
@@ -1557,8 +1611,16 @@ def tickets_bulk_archive(request):
         ticket.save()
     messages.success(request, _("The Ticket updated successfully."))
     previous_url = request.META.get("HTTP_REFERER", "/")
-    script = f'<script>window.location.href = "{previous_url}"</script>'
-    return HttpResponse(script)
+
+    # Prevent XSS / open redirect
+    if not url_has_allowed_host_and_scheme(
+        previous_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        previous_url = "/"
+
+    return redirect(previous_url)
 
 
 @login_required
@@ -1607,12 +1669,21 @@ def tickets_bulk_delete(request):
         except ProtectedError:
             messages.error(request, _("You cannot delete this Ticket."))
     previous_url = request.META.get("HTTP_REFERER", "/")
-    script = f'<script>window.location.href = "{previous_url}"</script>'
-    return HttpResponse(script)
+
+    # Prevent XSS / open redirect
+    if not url_has_allowed_host_and_scheme(
+        previous_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        previous_url = "/"
+
+    return redirect(previous_url)
 
 
 @login_required
 @hx_request_required
+@permission_required("helpdesk.add_departmentmanager")
 def create_department_manager(request):
     form = DepartmentManagerCreateForm()
     if request.method == "POST":
@@ -1621,7 +1692,7 @@ def create_department_manager(request):
             form.save()
             messages.success(request, _("The department manager created successfully."))
 
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {
         "form": form,
     }
@@ -1630,6 +1701,7 @@ def create_department_manager(request):
 
 @login_required
 @hx_request_required
+@permission_required("helpdesk.change_departmentmanager")
 def update_department_manager(request, dep_id):
     department_manager = DepartmentManager.objects.get(id=dep_id)
     form = DepartmentManagerCreateForm(instance=department_manager)
@@ -1638,7 +1710,7 @@ def update_department_manager(request, dep_id):
         if form.is_valid():
             form.save()
             messages.success(request, _("The department manager updated successfully."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {
         "form": form,
         "dep_id": dep_id,
@@ -1649,7 +1721,12 @@ def update_department_manager(request, dep_id):
 @login_required
 @permission_required("helpdesk.delete_departmentmanager")
 def delete_department_manager(request, dep_id):
-    department_manager = DepartmentManager.objects.get(id=dep_id)
+    department_manager = DepartmentManager.find(dep_id)
+    if not department_manager:
+        return HorillaRedirect(
+            request, message=_("No Department Manager found matching the query.")
+        )
+
     count = DepartmentManager.objects.count()
     department_manager.delete()
     messages.success(request, _("The department manager has been deleted successfully"))
@@ -1659,12 +1736,21 @@ def delete_department_manager(request, dep_id):
 
 
 @login_required
+@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def update_priority(request, ticket_id):
     """
     This function is used to update the priority
     from the detailed view
     """
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        messages.error(
+            request,
+        )
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     if (
         request.user.has_perm("helpdesk.view_ticket")
         or ticket.employee_id.get_reporting_manager() == request.user.employee_get
@@ -1682,18 +1768,8 @@ def update_priority(request, ticket_id):
             ticket.priority = "high"
         ticket.save()
         messages.success(request, _("Priority updated successfully."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
-    else:
-        messages.info(request, _("You don't have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-
-        # Handle request for HTMX if needed
-        if "HTTP_HX_REQUEST" in request.META:
-            return render(request, "decorator_404.html")
-        else:
-            return HttpResponse(
-                f'<script>window.location.href = "{previous_url}"</script>'
-            )
+        return HorillaRedirect(request)
+    return handle_no_permission(request)
 
 
 @login_required
@@ -1709,8 +1785,8 @@ def ticket_type_view(request):
 
 
 @login_required
-# @hx_request_required
-@permission_required("helpdesk.create_tickettype")
+@hx_request_required
+@permission_required("helpdesk.add_tickettype")
 def ticket_type_create(request):
     """
     This method renders form and template to create Ticket type
@@ -1734,7 +1810,7 @@ def ticket_type_create(request):
             form.save()
             form = TicketTypeForm()
             messages.success(request, _("Ticket type has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/ticket_type/ticket_type_form.html",
@@ -1746,7 +1822,7 @@ def ticket_type_create(request):
 
 @login_required
 @hx_request_required
-@permission_required("helpdesk.update_tickettype")
+@permission_required("helpdesk.change_tickettype")
 def ticket_type_update(request, t_type_id):
     """
     This method renders form and template to create Ticket type
@@ -1759,7 +1835,7 @@ def ticket_type_update(request, t_type_id):
             form.save()
             form = TicketTypeForm()
             messages.success(request, _("Ticket type has been updated successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/ticket_type/ticket_type_form.html",
@@ -1786,7 +1862,6 @@ def ticket_type_delete(request, t_type_id):
         except:
             messages.error(request, _("Ticket type can not delete"))
             return HttpResponse("<script>$('.reload-record').click()</script>")
-    # return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
     return HttpResponse("<script>$('#reloadMessagesButton').click()</script>")
 
 
@@ -1804,30 +1879,30 @@ def view_department_managers(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("helpdesk.change_departmentmanager")
 def get_department_employees(request):
-    """
-    Method to return employees in the department.
-    """
-    department = (
-        Department.objects.filter(id=request.GET.get("dep_id")).first()
-        if request.GET.get("dep_id")
-        else None
+    """Return employees in a department."""
+    dep_id = request.GET.get("dep_id")
+
+    employees = []
+    if dep_id:
+        employees = list(
+            EmployeeWorkInformation.objects.filter(department_id=dep_id)
+            .select_related("employee_id")
+            .values_list("employee_id__id", "employee_id")
+        )
+
+    employee_html = render_to_string(
+        "employee/employees_select.html",
+        {"employees": employees},
     )
-    if department:
-        employees_qs = department.employeeworkinformation_set.all()
-        employees_queryset = [
-            (emp.employee_id.id, emp.employee_id) for emp in employees_qs
-        ]
-    else:
-        employees_queryset = None
-    employees = list(employees_queryset)
-    context = {"employees": employees}
-    employee_html = render_to_string("employee/employees_select.html", context)
+
     return HttpResponse(employee_html)
 
 
 @login_required
+@hx_request_required
 def load_faqs(request):
     base_dir = settings.BASE_DIR
     faq_file = os.path.join(base_dir, "load_data", "faq.json")
@@ -1942,11 +2017,17 @@ def load_faqs(request):
 
 @login_required
 @hx_request_required
+@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
 def ticket_file_upload(request, id):
     """
     This function is used to upload files to the ticket.
     """
-    ticket = Ticket.objects.get(id=id)
+    ticket = Ticket.find(id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+
     if request.method == "POST":
         files = request.FILES.getlist("file")
 

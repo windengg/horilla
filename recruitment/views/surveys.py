@@ -10,11 +10,12 @@ from datetime import datetime
 from uuid import uuid4
 
 from django.contrib import messages
+from django.contrib.auth.models import User
 from django.core import serializers
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import ProtectedError
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.translation import gettext_lazy as _
 
@@ -25,6 +26,7 @@ from horilla.decorators import (
     login_required,
     permission_required,
 )
+from horilla.http import HorillaRedirect
 from recruitment.filters import SurveyFilter
 from recruitment.forms import (
     AddQuestionForm,
@@ -54,8 +56,16 @@ def survey_form(request):
     """
     This method is used to render survey wform
     """
-    recruitment_id = request.GET["recId"]
-    recruitment = Recruitment.objects.get(id=recruitment_id)
+    recruitment_id = request.GET.get("recId")
+    recruitment = Recruitment.find(recruitment_id)
+    if not recruitment_id or not recruitment:
+        message = (
+            _("Missing Recruitment ID")
+            if not recruitment_id
+            else _("No Recruitment found matching the query.")
+        )
+        return HorillaRedirect(request, message=message)
+
     form = SurveyForm(recruitment=recruitment).form
     return render(request, "survey/form.html", {"form": form})
 
@@ -67,7 +77,14 @@ def survey_preview(request, pk=None):
     Used to render survey form to the candidate
     """
     title = request.GET.get("title")
-    template = SurveyTemplate.objects.get(title=title)
+    template = SurveyTemplate.objects.filter(title=title).first()
+    if not title or not template:
+        message = (
+            _("Missing Survey Template Title")
+            if not title
+            else _("No Survey Template found matching the query.")
+        )
+        return HorillaRedirect(request, message=message)
 
     form = SurveyPreviewForm(template=template).form
     return render(
@@ -113,6 +130,10 @@ def candidate_survey(request):
     Used to render survey form to the candidate
     """
     MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB in bytes
+    if not request.session.get("candidate"):
+        return HorillaRedirect(
+            request, message=_("No candidate found matching the query.")
+        )
     candidate_json = request.session["candidate"]
     candidate_dict = json.loads(candidate_json)
     rec_id = candidate_dict[0]["fields"]["recruitment_id"]
@@ -120,9 +141,15 @@ def candidate_survey(request):
     job = JobPosition.objects.get(id=job_id)
     recruitment = Recruitment.objects.get(id=rec_id)
     stage_id = candidate_dict[0]["fields"]["stage_id"]
+    created_by = candidate_dict[0]["fields"].get("created_by")
+    modified_by = candidate_dict[0]["fields"].get("modified_by")
     candidate_dict[0]["fields"]["recruitment_id"] = recruitment
     candidate_dict[0]["fields"]["job_position_id"] = job
     candidate_dict[0]["fields"]["stage_id"] = Stage.objects.get(id=stage_id)
+    if created_by:
+        candidate_dict[0]["fields"]["created_by"] = User(id=created_by)
+    if modified_by:
+        candidate_dict[0]["fields"]["modified_by"] = User(id=modified_by)
     candidate = Candidate(**candidate_dict[0]["fields"])
     form = SurveyForm(recruitment=recruitment).form
     if request.method == "POST":
@@ -283,12 +310,7 @@ def update_question_template(request, survey_id):
             instance.recruitment_ids.set(form.recruitment)
             # instance.job_position_ids.set(form.job_positions)
             messages.success(request, _("New survey question updated."))
-            return HttpResponse(
-                render(
-                    request, "survey/template_update_form.html", {"form": form}
-                ).content.decode("utf-8")
-                + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(request, "survey/template_update_form.html", {"form": form})
 
 
@@ -309,12 +331,7 @@ def create_question_template(request):
             instance.template_id.set(form.cleaned_data["template_id"])
             # instance.job_position_ids.set(form.job_positions)
             messages.success(request, _("New survey question created."))
-            return HttpResponse(
-                render(
-                    request, "survey/template_form.html", {"form": form}
-                ).content.decode("utf-8")
-                + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(request, "survey/template_form.html", {"form": form})
 
 
@@ -447,7 +464,7 @@ def create_template(request):
         or request.user.has_perm("recruitment.change_surveytemplate")
     ):
         messages.info(request, "You dont have permission.")
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
     title = request.GET.get("title")
     instance = None
@@ -459,7 +476,7 @@ def create_template(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Template saved")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, "survey/main_form.html", {"form": form})
 
 
@@ -476,7 +493,7 @@ def delete_template(request):
     else:
         messages.success(request, "Template group deleted")
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -497,5 +514,5 @@ def question_add(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Question added")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, "survey/add_form.html", {"form": form})

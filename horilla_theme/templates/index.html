@@ -131,7 +131,7 @@
         {% endblock %}
     </head>
 
-    <body class="bg-secondary-50 font-[Inter,_sans-serif] overflow-hidden {% if request.session.theme == 'dark' %}dark{% endif %}">
+    <body class="bg-[{{theme_obj.primary_50}}] font-[Inter,_sans-serif] overflow-hidden {% if request.session.theme == 'dark' %}dark{% endif %}">
         {% get_current_language_bidi as LANGUAGE_BIDI %}
         {% get_current_language as LANGUAGE_CODE %}
         <div hidden id="statiUrl" data-url='{% static "" %}'></div>
@@ -153,10 +153,14 @@
                     {% include "horilla_theme/components/header.html" %}
                 </div>
 
-                <div class="p-6 pt-24">
+                <div id="ohMainContent" class="p-6 pt-24">
                     {% block content %}
                         {% include "horilla_theme/components/dashboard.html" %}
                     {% endblock %}
+
+                    <div id="imagePreview" style="display:none; position:absolute; z-index:9999;">
+                        <img id="previewImg" src="" style="box-shadow:0 10px 20px rgba(0,0,0,0.3); background:white;" class="rounded-lg">
+                    </div>
                     <div class="oh-modal" style="z-index: 100;" id="objectDetailsModal" role="dialog"
                         aria-labelledby="objectDetailsModalLabel" aria-hidden="true">
                         <div class="oh-modal__dialog oh-modal__dialog-relative" id="objectDetailsModalTarget"> </div>

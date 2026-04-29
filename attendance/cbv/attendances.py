@@ -28,7 +28,12 @@ from employee.cbv.employees import EmployeeCard, EmployeeNav, EmployeesList
 from employee.filters import EmployeeFilter
 from employee.models import Employee
 from horilla.filters import HorillaFilterSet
-from horilla_views.cbv_methods import login_required, render_template
+from horilla.http.response import HorillaRedirect
+from horilla_views.cbv_methods import (
+    hx_request_required,
+    login_required,
+    render_template,
+)
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
     HorillaFormView,
@@ -272,6 +277,7 @@ class AttendancesNavView(HorillaNavView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(manager_can_enter("attendance.view_attendance"), name="dispatch")
 class AttendancesExportNav(TemplateView):
     """
@@ -345,6 +351,7 @@ class OTAttendancesList(AttendancesListView):
         super().__init__(**kwargs)
         self.search_url = reverse("ot-attendance-tab")
         self.action_method = "ot_approve"
+        self.ordered_ids_key = "overtime_instance_ids"
 
     def get_queryset(self):
         if not self.queryset:
@@ -460,6 +467,10 @@ class OtDetailView(GenericAttendancesDetailView):
 
     action_method = "ot_detail_actions"
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.ordered_ids_key = "overtime_instance_ids"
+
 
 @method_decorator(login_required, name="dispatch")
 @method_decorator(manager_can_enter("attendance.view_attendance"), name="dispatch")
@@ -526,7 +537,7 @@ class AttendanceUpdateFormView(HorillaFormView):
             message = _("Attandance Updated")
             form.save()
             messages.success(self.request, message)
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(self.request)
         return super().form_valid(form)
 
 
@@ -616,10 +627,9 @@ class ValidateAttendancesIndividualTabView(AttendancesListView):
     def get_queryset(self):
         queryset = super().get_queryset()
         pk = self.kwargs.get("pk")
-        queryset = queryset.filter(
+        queryset = self.model.objects.filter(
             employee_id=pk,
             attendance_validated=False,
-            employee_id__is_active=True,
         )
         queryset = (
             filtersubordinates(self.request, queryset, "attendance.view_attendance")

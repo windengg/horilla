@@ -311,6 +311,9 @@ $("#deletePayslipBulk").click(function (e) {
                             // console.log("Unexpected HTTP status:", jqXHR.status);
                         }
                     },
+                    error: () => {
+                        reloadmessage()
+                    }
                 });
             }
         });
@@ -571,7 +574,7 @@ $("#DeleteContractBulk").click(function (e) {
 
                 $.ajax({
                     type: "POST",
-                    url: "/payroll/contract-bulk-delete",
+                    url: "/payroll/contract-bulk-delete/",
                     data: {
                         csrfmiddlewaretoken: getCookie("csrftoken"),
                         ids: JSON.stringify(ids),
@@ -583,6 +586,9 @@ $("#DeleteContractBulk").click(function (e) {
                             // console.log("Unexpected HTTP status:", jqXHR.status);
                         }
                     },
+                    error: () => {
+                        reloadmessage()
+                    }
                 });
             }
         });

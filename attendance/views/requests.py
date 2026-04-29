@@ -11,7 +11,7 @@ from urllib.parse import parse_qs
 
 from django.contrib import messages
 from django.db.models import ProtectedError, Q
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -53,6 +53,7 @@ from horilla.decorators import (
     manager_can_enter,
     permission_required,
 )
+from horilla.http.response import HorillaRedirect
 from notifications.signals import notify
 
 
@@ -160,14 +161,7 @@ def request_new(request):
             if form.is_valid():
                 instance = form.save(commit=False)
                 messages.success(request, _("Attendance request created"))
-                return HttpResponse(
-                    render(
-                        request,
-                        "requests/attendance/request_new_form.html",
-                        {"form": form},
-                    ).content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
         return render(
             request,
             "requests/attendance/request_new_form.html",
@@ -200,23 +194,9 @@ def request_new(request):
             if form.new_instance is not None:
                 form.new_instance.save()
                 messages.success(request, _("New attendance request created"))
-                return HttpResponse(
-                    render(
-                        request,
-                        "requests/attendance/request_new_form.html",
-                        {"form": form},
-                    ).content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
             messages.success(request, _("Update request updated"))
-            return HttpResponse(
-                render(
-                    request,
-                    "requests/attendance/request_new_form.html",
-                    {"form": form},
-                ).content.decode("utf-8")
-                + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "requests/attendance/request_new_form.html",
@@ -225,6 +205,7 @@ def request_new(request):
 
 
 @login_required
+@hx_request_required
 def create_batch_attendance(request):
     form = BatchAttendanceForm()
     previous_form_data = request.GET.urlencode()
@@ -263,6 +244,7 @@ def create_batch_attendance(request):
 
 
 @login_required
+@hx_request_required
 def get_batches(request):
     batches = BatchAttendance.objects.all()
     return render(
@@ -320,7 +302,12 @@ def attendance_request_changes(request, attendance_id):
     """
     This method is used to store the requested changes to the instance
     """
-    attendance = Attendance.objects.get(id=attendance_id)
+    attendance = Attendance.find(attendance_id)
+    if not attendance:
+        return HorillaRedirect(
+            request, message=_("No Attendance found matching the query.")
+        )
+
     if request.GET.get("previous_url"):
         form = AttendanceRequestForm(initial=request.GET.dict())
     else:
@@ -398,14 +385,7 @@ def attendance_request_changes(request, attendance_id):
                     + f"?id={attendance.id}",
                     icon="checkmark-circle-outline",
                 )
-            return HttpResponse(
-                render(
-                    request,
-                    "requests/attendance/form.html",
-                    {"form": form, "attendance_id": attendance_id},
-                ).content.decode("utf-8")
-                + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "requests/attendance/form.html",
@@ -420,7 +400,12 @@ def validate_attendance_request(request, attendance_id):
     args:
         attendance_id : attendance id
     """
-    attendance = Attendance.objects.get(id=attendance_id)
+    attendance = Attendance.find(attendance_id)
+    if not attendance:
+        return HorillaRedirect(
+            request, message=_("No Attendance found matching the query.")
+        )
+
     first_dict = attendance.serialize()
     empty_data = {
         "employee_id": None,
@@ -464,7 +449,12 @@ def approve_validate_attendance_request(request, attendance_id):
     """
     This method is used to validate the attendance requests
     """
-    attendance = Attendance.objects.get(id=attendance_id)
+    attendance = Attendance.find(attendance_id)
+    if not attendance:
+        return HorillaRedirect(
+            request, message=_("No Attendance found matching the query.")
+        )
+
     prev_attendance_date = attendance.attendance_date
     prev_attendance_clock_in_date = attendance.attendance_clock_in_date
     prev_attendance_clock_in = attendance.attendance_clock_in
@@ -576,7 +566,7 @@ def approve_validate_attendance_request(request, attendance_id):
             redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
             icon="checkmark-circle-outline",
         )
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -613,13 +603,15 @@ def cancel_attendance_request(request, attendance_id):
                 verb_es=f"Tu solicitud de asistencia para el {attendance.attendance_date} ha sido rechazada",
                 verb_fr=f"Votre demande de présence pour le {attendance.attendance_date} est rejetée",
                 icon="close-circle-outline",
+                redirect=reverse("request-attendance-view"),
             )
     except (Attendance.DoesNotExist, OverflowError):
         messages.error(request, _("Attendance request not found"))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
+@hx_request_required
 def select_all_filter_attendance_request(request):
     page_number = request.GET.get("page")
     filtered = request.GET.get("filter")
@@ -662,8 +654,7 @@ def bulk_approve_attendance_request(request):
     """
     This method is used to validate the attendance requests
     """
-    ids = request.POST["ids"]
-    ids = json.loads(ids)
+    ids = json.loads(request.POST.get("ids", "[]"))
     filtered_ids = []
     for attendance_id in ids:
         attendance = Attendance.objects.get(id=attendance_id)
@@ -796,8 +787,7 @@ def bulk_reject_attendance_request(request):
     """
     This method is used to delete bulk attendance request
     """
-    ids = request.POST["ids"]
-    ids = json.loads(ids)
+    ids = json.loads(request.POST.get("ids", "[]"))
     for attendance_id in ids:
         try:
             attendance = Attendance.objects.get(id=attendance_id)
@@ -829,6 +819,8 @@ def bulk_reject_attendance_request(request):
                     verb_es=f"Tu solicitud de asistencia para el {attendance.attendance_date} ha sido rechazada",
                     verb_fr=f"Votre demande de présence pour le {attendance.attendance_date} est rejetée",
                     icon="close-circle-outline",
+                    redirect=reverse("request-attendance-view")
+                    + f"?id={attendance.id}",
                 )
         except (Attendance.DoesNotExist, OverflowError):
             messages.error(request, _("Attendance request not found"))
@@ -841,7 +833,12 @@ def edit_validate_attendance(request, attendance_id):
     """
     This method is used to edit and update the validate request attendance
     """
-    attendance = Attendance.objects.get(id=attendance_id)
+    attendance = Attendance.find(attendance_id)
+    if not attendance:
+        return HorillaRedirect(
+            request, message=_("No Attendance found matching the query.")
+        )
+
     initial = attendance.serialize()
     if request.GET.get("previous_url"):
         initial = request.GET.dict()

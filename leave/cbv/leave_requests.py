@@ -4,6 +4,7 @@ This page handles the cbv of leave requests page
 
 import ast
 import contextlib
+from datetime import date
 from typing import Any
 
 from django.contrib import messages
@@ -19,7 +20,7 @@ from base.decorators import manager_can_enter
 from base.filters import PenaltyFilter
 from base.methods import choosesubordinates, filtersubordinates, is_reportingmanager
 from base.models import PenaltyAccounts
-from horilla_views.cbv_methods import login_required
+from horilla_views.cbv_methods import hx_request_required, login_required
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
     HorillaFormView,
@@ -85,8 +86,9 @@ class LeaveRequestsListView(HorillaListView):
         queryset = super().get_queryset()
         data = queryset
         queryset = filter_conditional_leave_request(self.request)
-        data = filtersubordinates(self.request, data, "leave.view_leaverequest")
-        return data
+        qs = data.filter(id__in=queryset.values_list("id", flat=True))
+        data = filtersubordinates(self.request, data, "leave.view_leaverequest") | qs
+        return data.distinct()
 
     filter_class = LeaveRequestFilter
     model = LeaveRequest
@@ -103,12 +105,12 @@ class LeaveRequestsListView(HorillaListView):
         (_("Penalities"), "penality_col"),
     ]
     row_attrs = """
-                {is_attendance_request_cancelled},
-                hx-get='{leave_requests_detail_view}?instance_ids={ordered_ids}'
-                hx-target="#genericModalBody"
-                data-target="#genericModal"
-                data-toggle="oh-modal-toggle"
-                """
+        {is_attendance_request_cancelled},
+        hx-get='{leave_requests_detail_view}?instance_ids={ordered_ids}'
+        hx-target="#genericModalBody"
+        data-target="#genericModal"
+        data-toggle="oh-modal-toggle"
+    """
     sortby_mapping = [
         (_("Employee"), "employee_id__get_full_name", "employee_id__get_avatar"),
         (_("Leave Type"), "leave_type_id"),
@@ -122,12 +124,8 @@ class LeaveRequestsListView(HorillaListView):
     option_method = "actions_col"
 
     header_attrs = {
-        "leave_requests_custom_emp_col": """
-                                style="width:200px !important;"
-                                """,
-        "option": """
-                                style="width:200px !important;"
-                                """,
+        "leave_requests_custom_emp_col": """ style="width:200px !important;" """,
+        "option": """ style="width:200px !important;" """,
     }
 
     row_status_indications = [
@@ -135,13 +133,13 @@ class LeaveRequestsListView(HorillaListView):
             "rejected--dot",
             _("Rejected"),
             """
-            onclick="
-            $('#applyFilter').closest('form').find('[name=status]').val('rejected');
-            $('[name=canceled]').val('unknown').change();
-            $('[name=approved]').val('unknown').change();
-            $('[name=requested]').val('unknown').change();
-            $('#applyFilter').click();
-            "
+                onclick="
+                    $('#applyFilter').closest('form').find('[name=status]').val('rejected');
+                    $('[name=canceled]').val('unknown').change();
+                    $('[name=approved]').val('unknown').change();
+                    $('[name=requested]').val('unknown').change();
+                    $('#applyFilter').click();
+                "
 
             """,
         ),
@@ -149,13 +147,13 @@ class LeaveRequestsListView(HorillaListView):
             "cancelled--dot",
             _("Cancelled"),
             """
-            onclick="
-            $('#applyFilter').closest('form').find('[name=status]').val('cancelled');
-            $('[name=rejected]').val('unknown').change();
-            $('[name=approved]').val('unknown').change();
-            $('[name=requested]').val('unknown').change();
-            $('#applyFilter').click();
-            "
+                onclick="
+                    $('#applyFilter').closest('form').find('[name=status]').val('cancelled');
+                    $('[name=rejected]').val('unknown').change();
+                    $('[name=approved]').val('unknown').change();
+                    $('[name=requested]').val('unknown').change();
+                    $('#applyFilter').click();
+                "
 
             """,
         ),
@@ -163,13 +161,13 @@ class LeaveRequestsListView(HorillaListView):
             "approved--dot",
             _("Approved"),
             """
-            onclick="
-            $('#applyFilter').closest('form').find('[name=status]').val('approved');
-            $('[name=rejected]').val('unknown').change();
-            $('[name=canceled]').val('unknown').change();
-            $('[name=requested]').val('unknown').change();
-            $('#applyFilter').click();
-            "
+                onclick="
+                    $('#applyFilter').closest('form').find('[name=status]').val('approved');
+                    $('[name=rejected]').val('unknown').change();
+                    $('[name=canceled]').val('unknown').change();
+                    $('[name=requested]').val('unknown').change();
+                    $('#applyFilter').click();
+                "
 
             """,
         ),
@@ -177,13 +175,13 @@ class LeaveRequestsListView(HorillaListView):
             "requested--dot",
             _("Requested"),
             """
-            onclick="
-            $('#applyFilter').closest('form').find('[name=status]').val('requested');
-            $('[name=rejected]').val('unknown').change();
-            $('[name=canceled]').val('unknown').change();
-            $('[name=approved]').val('unknown').change();
-            $('#applyFilter').click();
-            "
+                onclick="
+                    $('#applyFilter').closest('form').find('[name=status]').val('requested');
+                    $('[name=rejected]').val('unknown').change();
+                    $('[name=canceled]').val('unknown').change();
+                    $('[name=approved]').val('unknown').change();
+                    $('#applyFilter').click();
+                "
 
             """,
         ),
@@ -215,9 +213,7 @@ class LeaveRequestsNavView(HorillaNavView):
             {
                 "action": _("Bulk Approve"),
                 "attrs": """
-                    onclick="
-                    bulkApproveLeaveRequests();
-                    "
+                    onclick="bulkApproveLeaveRequests();"
                     style="cursor: pointer;"
                 """,
             },
@@ -234,9 +230,7 @@ class LeaveRequestsNavView(HorillaNavView):
             {
                 "action": _("Delete"),
                 "attrs": """
-                    onclick="
-                    bulkDeleteLeaveRequests();
-                    "
+                    onclick="bulkDeleteLeaveRequests();"
                     data-action ="delete"
                     style="cursor: pointer; color:red !important"
                 """,
@@ -278,6 +272,7 @@ class LeaveRequestsNavView(HorillaNavView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(manager_can_enter("leave.view_leaverequest"), name="dispatch")
 class LeaveRequestsExportNav(TemplateView):
     """
@@ -326,7 +321,12 @@ class LeaveRequestsDetailView(HorillaDetailedView):
     cols = {
         "description": 12,
     }
-    action_method = "leave_requests_detail_view_actions"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.action_method = "leave_requests_detail_view_actions"
+        if self.request.GET.get("dashboard"):
+            self.action_method = None
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -338,6 +338,7 @@ class LeaveRequestsDetailView(HorillaDetailedView):
                 insert_index,
                 (_("Multiple Approvals"), "multiple_approval_action", True),
             )
+            self.cols["multiple_approval_action"] = 12
 
         if self.instance.reject_reason:
             insert_index = 8
@@ -586,3 +587,30 @@ ViewPenaltyList.columns.extend(
         (_("Deducted FromCFD"), "get_deduct_from_carry_forward"),
     ]
 )
+
+
+class DashboardOnLeaveTable(LeaveRequestsListView):
+
+    columns = [("", "leave_requests_custom_emp_col")]
+    bulk_select_option = False
+    show_toggle_form = False
+    action_method = None
+    option_method = None
+    sortby_mapping = []
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        today = date.today()
+
+        self.queryset = queryset.filter(start_date__lte=today, end_date__gte=today)
+
+        return self.queryset
+
+    row_attrs = """
+        {is_attendance_request_cancelled},
+        hx-get='{leave_requests_detail_view}?instance_ids={ordered_ids}&dashboard=True'
+        hx-target="#genericModalBody"
+        data-target="#genericModal"
+        data-toggle="oh-modal-toggle"
+        style="cursor:pointer"
+    """

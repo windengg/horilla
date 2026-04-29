@@ -14,6 +14,7 @@ from django.core.mail import EmailMessage
 from django.core.paginator import Paginator
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
+from django.utils.translation import gettext_lazy as _
 
 from base.backends import ConfiguredEmailBackend
 from base.forms import MailTemplateForm
@@ -22,7 +23,8 @@ from base.models import HorillaMailTemplate
 from employee.filters import EmployeeFilter
 from employee.models import Employee
 from horilla import settings
-from horilla.decorators import login_required, manager_can_enter
+from horilla.decorators import hx_request_required, login_required, manager_can_enter
+from horilla.http.response import HorillaRedirect
 
 
 def paginator_qry(qryset, page_number):
@@ -75,6 +77,7 @@ def not_out_yet(request):
 
 
 @login_required
+@hx_request_required
 @manager_can_enter("employee.change_employee")
 def send_mail(request, emp_id=None):
     """
@@ -82,7 +85,12 @@ def send_mail(request, emp_id=None):
     """
     employee = None
     if emp_id:
-        employee = Employee.objects.get(id=emp_id)
+        try:
+            employee = Employee.objects.get(id=emp_id)
+        except Employee.DoesNotExist:
+            return HorillaRedirect(
+                request, message=_("No Employee found matching the query.")
+            )
     employees = Employee.objects.all()
     templates = HorillaMailTemplate.objects.all()
     return render(
@@ -112,7 +120,12 @@ def employee_data_export(request, emp_id=None):
     ):
         employee = None
         if emp_id:
-            employee = Employee.objects.get(id=emp_id)
+            try:
+                employee = Employee.objects.get(id=emp_id)
+            except Employee.DoesNotExist:
+                return HorillaRedirect(
+                    request, message=_("No Employee found matching the query.")
+                )
 
         context = {"employee": employee}
 
@@ -172,7 +185,11 @@ def get_template(request, emp_id):
     """
     This method is used to return the mail template
     """
-    body = HorillaMailTemplate.objects.get(id=emp_id).body
+    body = (
+        HorillaMailTemplate.find(emp_id).body
+        if HorillaMailTemplate.find(emp_id)
+        else ""
+    )
     return JsonResponse({"body": body})
 
 
@@ -231,7 +248,7 @@ def send_mail_to_employee(request):
     """
     This method is used to send acknowledgement mail to the employee
     """
-    employee_id = request.POST["id"]
+    employee_id = request.POST.get("id")
     subject = request.POST.get("subject")
     bdy = request.POST.get("body")
 
@@ -298,4 +315,4 @@ def send_mail_to_employee(request):
                 messages.info(request, f"Email not set for {employee.get_full_name()}")
         except Exception as e:
             messages.error(request, "Something went wrong")
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)

@@ -19,7 +19,11 @@ from base.methods import choosesubordinates, filtersubordinates, is_reportingman
 from base.models import WorkType, WorkTypeRequest
 from base.views import include_employee_instance
 from employee.models import Employee
-from horilla_views.cbv_methods import login_required, permission_required
+from horilla_views.cbv_methods import (
+    hx_request_required,
+    login_required,
+    permission_required,
+)
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
     HorillaFormView,
@@ -269,11 +273,11 @@ class WorkTypeDetailView(HorillaDetailedView):
         "description": 12,
     }
 
-    action_method = "confirmation"
+    action_method = "detail_confirmation"
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.action_method = "confirmation"
+        self.action_method = "detail_confirmation"
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -287,6 +291,7 @@ class WorkTypeDetailView(HorillaDetailedView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 class WorkExportCandidate(TemplateView):
     """
     view for Export candidates

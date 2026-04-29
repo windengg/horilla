@@ -54,7 +54,7 @@ $("#deleteTimeSheet").click(function (e) {
 
                 $.ajax({
                     type: "POST",
-                    url: "/project/time-sheet-bulk-delete",
+                    url: "/project/time-sheet-bulk-delete/",
                     data: {
                         csrfmiddlewaretoken: getCookie("csrftoken"),
                         ids: JSON.stringify(ids),
@@ -65,6 +65,9 @@ $("#deleteTimeSheet").click(function (e) {
                         } else {
                             // console.log("Unexpected HTTP status:", jqXHR.status);
                         }
+                    },
+                    error: (error) => {
+                        location.reload();
                     },
                 });
             }
@@ -102,7 +105,7 @@ function deleteTimeSheet() {
 
                 $.ajax({
                     type: "POST",
-                    url: "/project/time-sheet-bulk-delete",
+                    url: "/project/time-sheet-bulk-delete/",
                     data: {
                         csrfmiddlewaretoken: getCookie("csrftoken"),
                         ids: JSON.stringify(ids),

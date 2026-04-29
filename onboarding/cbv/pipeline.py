@@ -5,6 +5,7 @@ onboarding/cbv/pipeline.py
 import re
 
 from django.contrib import messages
+from django.core.exceptions import ObjectDoesNotExist
 from django.http import HttpResponse
 from django.urls import reverse, reverse_lazy
 from django.utils.decorators import method_decorator
@@ -14,7 +15,12 @@ from django.views.generic import TemplateView
 
 from base.methods import eval_validate
 from horilla.horilla_middlewares import _thread_locals
-from horilla_views.cbv_methods import login_required, render_template
+from horilla.http.response import HorillaRedirect
+from horilla_views.cbv_methods import (
+    hx_request_required,
+    login_required,
+    render_template,
+)
 from horilla_views.generic.cbv.kanban import HorillaKanbanView
 from horilla_views.generic.cbv.pipeline import Pipeline
 from horilla_views.generic.cbv.views import (
@@ -221,6 +227,7 @@ onboarding_models.OnboardingStage.bulk_send_mail_path = bulk_send_mail_path
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(
     all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
 )
@@ -346,7 +353,7 @@ class CandidateOnboardingDetail(CandidateDetail):
         (_("Stage"), "stage_drop_down"),
         (_("Rating"), "rating_bar"),
         (_("Recruitment"), "recruitment_id"),
-        (_("Job Position"), "job_position_id"),
+        (_("Job Position"), "job_position_id__job_position"),
         (_("Tasks"), "task_fetch", True),
     ]
 
@@ -379,10 +386,8 @@ class CandidateList(HorillaListView):
     filter_keys_to_remove = ["onboarding_stage_id", "rec_id", "recruitment_id"]
     custom_empty_template = "cbv/pipeline/empty.html"
     header_attrs = {
-        "action": "style='width:313px;'",
-        "mobile": "style='width:100px;'",
-        "Stage": "style='width:100px;'",
-        "get_interview_count": "style='width:200px;'",
+        "action": "style='width:300px;'",
+        "stage_drop_down": "style='width:100px;'",
     }
     columns = [
         (_("Name"), "candidate_id__candidate_name", "candidate_id__get_avatar"),
@@ -390,7 +395,7 @@ class CandidateList(HorillaListView):
         (_("Contact"), "candidate_id__mobile"),
         (_("Stage"), "stage_drop_down"),
         (_("Rating"), "candidate_id__rating_bar"),
-        (_("Job Position"), "candidate_id__job_position_id"),
+        (_("Job Position"), "candidate_id__job_position_id__job_position"),
     ]
 
     default_columns = [
@@ -444,23 +449,23 @@ class CandidateList(HorillaListView):
                     onclick="$('#activitySidebar').addClass('oh-activity-sidebar--show')"
                 """,
         },
-        {
-            "action": _("Document Request"),
-            "icon": "document-attach-outline",
-            "attrs": """
-                     hx-get="{candidate_id__get_document_request}"
-                    data-target="#genericModal"
-                    hx-target="#genericModalBody"
-                    class="oh-btn oh-btn--danger-outline oh-btn--light-bkg w-100"
-                    data-toggle="oh-modal-toggle"
-                """,
-        },
+        # {
+        #     "action": _("Document Request"),
+        #     "icon": "document-attach-outline",
+        #     "attrs": """
+        #             hx-get="{candidate_id__get_document_request}"
+        #             data-target="#genericModal"
+        #             hx-target="#genericModalBody"
+        #             class="oh-btn oh-btn--danger-outline oh-btn--light-bkg w-100"
+        #             data-toggle="oh-modal-toggle"
+        #         """,
+        # },
     ]
     records_count_in_tab = False
 
     def get(self, request, *args, **kwargs):
         self.selected_instances_key_id = (
-            f"selectedCandidateRecords{self.request.GET['onboarding_stage_id']}"
+            f"selectedCandidateRecords{self.request.GET.get('onboarding_stage_id')}"
         )
         return super().get(request, *args, **kwargs)
 
@@ -535,27 +540,48 @@ class CandidateList(HorillaListView):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.ordered_ids_key = f"ordered_ids_{recruitment_models.Candidate.__name__.lower()}{self.request.GET['onboarding_stage_id']}"
-        self.search_url = self.request.path
+        self.managing_onboarding_tasks = []
+        self.managing_onboarding_stages = []
+        self.managing_recruitments = []
+
+    def dispatch(self, request, *args, **kwargs):
+
+        if not request.user.is_authenticated:
+            messages.error(request, _("You are not logged in."))
+            return HorillaRedirect(request)
+
+        self.ordered_ids_key = (
+            f"ordered_ids_{recruitment_models.Candidate.__name__.lower()}"
+            f"{request.GET.get('onboarding_stage_id')}"
+        )
+        self.search_url = request.path
 
         self.managing_onboarding_tasks = (
             onboarding_models.OnboardingTask.objects.filter(
-                employee_id__employee_user_id=self.request.user
+                employee_id__employee_user_id=request.user
             ).values_list("pk", flat=True)
         )
-        self.request.managing_onboarding_tasks = self.managing_onboarding_tasks
+        request.managing_onboarding_tasks = self.managing_onboarding_tasks
 
         self.managing_onboarding_stages = (
             onboarding_models.OnboardingStage.objects.filter(
-                employee_id__employee_user_id=self.request.user
+                employee_id__employee_user_id=request.user
             ).values_list("pk", flat=True)
         )
-        self.request.managing_onboarding_stages = self.managing_onboarding_stages
+        request.managing_onboarding_stages = self.managing_onboarding_stages
 
         self.managing_recruitments = recruitment_models.Recruitment.objects.filter(
-            recruitment_managers__employee_user_id=self.request.user
+            recruitment_managers__employee_user_id=request.user
         ).values_list("pk", flat=True)
-        self.request.managing_recruitments = self.managing_recruitments
+        request.managing_recruitments = self.managing_recruitments
+
+        stage_id = request.GET.get("onboarding_stage_id")
+
+        if not stage_id:
+            return HorillaRedirect(
+                request, message=_("No stage found matching the query.")
+            )
+        return super().dispatch(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
         stage_id = self.request.GET["onboarding_stage_id"]
@@ -627,6 +653,7 @@ class CandidateList(HorillaListView):
         return context
 
 
+@method_decorator(login_required, name="dispatch")
 class CandidateKanbanView(HorillaKanbanView):
     """
     CandidateKanbanView
@@ -640,6 +667,7 @@ class CandidateKanbanView(HorillaKanbanView):
     filter_class = onboarding_filters.KanbanCandidateFilter
     group_filter_class = onboarding_filters.OnboardingStageFilter
     instance_order_by = "onboarding_stage__sequence"
+    group_label_key = "stage_title"
 
     details = {
         "image_src": "{get_avatar}",
@@ -765,6 +793,15 @@ class AssignTask(View):
     """
     AssignTask
     """
+
+    def dispatch(self, request, *args, **kwargs):
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except ObjectDoesNotExist:
+            messages.error(request, _("Requested object does not exist"))
+            return HorillaRedirect(
+                request, message=_("Requested object does not exist")
+            )
 
     def get(self, *args, **kwargs):
         """

@@ -11,6 +11,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from django import forms
 from django.contrib import messages
+from django.db.models import Min
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.template.loader import render_to_string
@@ -26,7 +27,13 @@ from xhtml2pdf import pisa
 
 from employee.forms import BulkUpdateFieldForm
 from horilla.horilla_middlewares import _thread_locals
-from horilla_views.cbv_methods import export_xlsx, login_required, permission_required
+from horilla.http.response import HorillaRedirect
+from horilla_views.cbv_methods import (
+    export_xlsx,
+    hx_request_required,
+    login_required,
+    permission_required,
+)
 from horilla_views.forms import DynamicBulkUpdateForm
 from horilla_views.generic.cbv.views import (
     HorillaCardView,
@@ -149,14 +156,15 @@ class ListCandidates(HorillaListView):
         else:
             self.option_method = None
 
-        unique_questions = RecruitmentSurvey.objects.values_list(
-            "question", flat=True
-        ).distinct()
+        unique_questions = RecruitmentSurvey.objects.values("question").annotate(
+            pk=Min("pk")
+        )
         self.survey_question_mapping = {}
+
         for question in unique_questions:
-            survey_question = (question, f"question_{clean_column_name(question)}")
-            self.survey_question_mapping[f"question_{clean_column_name(question)}"] = (
-                question
+            survey_question = (
+                question["question"],
+                f"get_survey_question_{question['pk']}",
             )
             if not survey_question in self.export_fields:
                 self.export_fields.append(survey_question)
@@ -170,6 +178,17 @@ class ListCandidates(HorillaListView):
         (_("Job Position"), "job_position_id"),
         (_("Hired Date"), "hired_date"),
         (_("Resume"), "resume_pdf"),
+    ]
+
+    export_columns = [
+        (_("Candidates"), "name"),
+        (_("Email"), "email"),
+        (_("Phone"), "mobile"),
+        (_("Rating"), "get_avg_rating"),
+        (_("Scheduled Interview"), "get_total_interview"),
+        (_("Recruitment"), "recruitment_id"),
+        (_("Job Position"), "job_position_id"),
+        (_("Hired Date"), "hired_date"),
     ]
     default_columns = columns
 
@@ -778,6 +797,7 @@ class CandidateNav(HorillaNavView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(manager_can_enter(perm="recruitment.view_candidate"), name="dispatch")
 class ExportView(TemplateView):
     """
@@ -837,7 +857,7 @@ class AddToRejectedCandidatesView(View):
         if form.is_valid():
             form.save()
             messages.success(request, _("Candidate reject reason saved"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
         return render(request, self.template_name, {"form": form})
 
 
@@ -862,52 +882,17 @@ class CandidateDetail(HorillaDetailedView):
         (_("Stage"), "stage_drop_down"),
         (_("Rating"), "rating_bar"),
         (_("Recruitment"), "recruitment_id"),
-        (_("Job Position"), "job_position_id"),
+        (_("Job Position"), "job_position_id__job_position"),
         (_("Interview Table"), "candidate_interview_view", True),
     ]
 
     cols = {
         "candidate_interview_view": 12,
     }
+    action_method = "detail_actions"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.actions = [
-            {
-                "action": _("Edit"),
-                "icon": "create-outline",
-                "attrs": """
-            class="oh-btn oh-btn--info w-50"
-            onclick="window.location.href='{get_update_url}' "
-            """,
-            },
-            {
-                "action": _("View"),
-                "icon": "eye-outline",
-                "attrs": """
-            class="oh-btn oh-btn--success w-50"
-            onclick="window.location.href='{get_individual_url}'"
-            """,
-            },
-        ]
-
-        if self.request.user.has_perm("recruitment.delete_candidate"):
-            self.actions.append(
-                {
-                    "action": _("Delete"),
-                    "icon": "trash-outline",
-                    "accessibility": "recruitment.cbv.candidates.delete_cand",
-                    "attrs": f"""
-            class="oh-btn oh-btn--danger w-50"
-            hx-get="{reverse_lazy("generic-delete")}?model=recruitment.Candidate&pk={{pk}}"
-            hx-target="#deleteConfirmationBody"
-            data-toggle="oh-modal-toggle"
-            data-target="#deleteConfirmation"
-            onclick="event.stopPropagation()
-            deleteCandidate('{{get_delete_url}}'); "
-            """,
-                }
-            )
 
 
 @method_decorator(login_required, name="dispatch")

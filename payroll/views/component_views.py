@@ -5,6 +5,7 @@ This module is used to write methods to the component_urls patterns respectively
 """
 
 import json
+import math
 import operator
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -45,6 +46,7 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.group_by import group_by_queryset
+from horilla.http.response import HorillaRedirect
 from horilla.methods import dynamic_attr, get_horilla_model_class, get_urlencode
 
 # from leave.models import AvailableLeave
@@ -122,6 +124,8 @@ def payroll_calculation(employee, start_date, end_date):
     """
 
     basic_pay_details = compute_salary_on_period(employee, start_date, end_date)
+    if not basic_pay_details:
+        return None
     contract = basic_pay_details["contract"]
     contract_wage = basic_pay_details["contract_wage"]
     basic_pay = basic_pay_details["basic_pay"]
@@ -484,7 +488,9 @@ def update_allowance(request, allowance_id, **kwargs):
     Args:
         id : allowance instance id
     """
-    instance = Allowance.objects.get(id=allowance_id)
+    instance = Allowance.find(allowance_id)
+    if not instance:
+        return HorillaRedirect(request, message=_("Allowance not found."))
     form = forms.AllowanceForm(instance=instance)
     if request.method == "POST":
         form = forms.AllowanceForm(request.POST, instance=instance)
@@ -534,7 +540,7 @@ def update_allowance(request, allowance_id, **kwargs):
 #         request.path.split("/")[2] == "delete-employee-allowance"
 #         or not payroll.models.models.Allowance.objects.filter()
 #     ):
-#         return HttpResponse("<script>window.location.reload();</script>")
+#         return return HorillaRedirect(request)
 #     return redirect(filter_allowance)
 
 
@@ -571,7 +577,7 @@ def delete_allowance(request, allowance_id, emp_id=None):
             http_hx_target == "payroll-deduction-container"
             and not Deduction.objects.filter()
         ):
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
         if redirected_path:
             return redirect(redirected_path)
 
@@ -710,7 +716,9 @@ def update_deduction(request, deduction_id, **kwargs):
     """
     This method is used to update the deduction instance
     """
-    instance = Deduction.objects.get(id=deduction_id)
+    instance = Deduction.find(deduction_id)
+    if not instance:
+        return HorillaRedirect(request, message=_("Deduction not found."))
     form = forms.DeductionForm(instance=instance)
     if request.method == "POST":
         form = forms.DeductionForm(request.POST, instance=instance)
@@ -756,7 +764,7 @@ def delete_deduction(request, deduction_id, emp_id=None):
             http_hx_target == "payroll-deduction-container"
             and not Deduction.objects.filter()
         ):
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
         if redirected_path:
             return redirect(redirected_path)
 
@@ -912,6 +920,7 @@ def check_contract_start_date(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("payroll.add_payslip")
 def create_payslip(request, new_post_data=None):
     """
@@ -996,8 +1005,11 @@ def create_payslip(request, new_post_data=None):
                     ),
                     icon="close",
                 )
-                return HttpResponse(
-                    f'<script>window.location.href = "/payroll/view-payslip/{payslip_data["instance"].id}/"</script>'
+                return HorillaRedirect(
+                    request,
+                    redirect_to=reverse(
+                        "view-payslip", kwargs={"payslip_id": payslip.pk}
+                    ),
                 )
     return render(
         request,
@@ -1007,6 +1019,7 @@ def create_payslip(request, new_post_data=None):
 
 
 @login_required
+@hx_request_required
 @permission_required("payroll.add_payslip")
 def validate_start_date(request):
     """
@@ -1014,42 +1027,59 @@ def validate_start_date(request):
     """
     end_datetime = None
     start_datetime = None
+    valid = True
+    errors = []
     start_date = request.GET.get("start_date")
     end_date = request.GET.get("end_date")
-    employee_id = request.GET.getlist("employee_id")
+    try:
+        employee_id = [
+            int(e) for e in request.GET.getlist("employee_id") if e.isdigit()
+        ]
+    except:
+        return HorillaRedirect(request, message=_("Invalid Request"))
+
     if start_date:
         start_datetime = datetime.strptime(start_date, "%Y-%m-%d").date()
     if end_date:
         end_datetime = datetime.strptime(end_date, "%Y-%m-%d").date()
-    error_message = ""
-    response = {"valid": True, "message": error_message}
     for emp_id in employee_id:
         contract = Contract.objects.filter(
             employee_id__id=emp_id, contract_status="active"
         ).first()
 
+        if not contract:
+            continue
+
         if start_datetime is not None and start_datetime < contract.contract_start_date:
-            error_message = f"<ul class='errorlist'><li>The {contract.employee_id}'s \
-                contract start date is smaller than pay period start date</li></ul>"
-            response["message"] = error_message
-            response["valid"] = False
+            errors.append(
+                _(
+                    "The %(employee)s's contract start date is smaller than pay period start date"
+                )
+                % {"employee": contract.employee_id}
+            )
+            valid = False
 
     if (
         start_datetime is not None
         and end_datetime is not None
         and start_datetime > end_datetime
     ):
-        error_message = "<ul class='errorlist'><li>The end date must be greater than \
-                or equal to the start date.</li></ul>"
-        response["message"] = error_message
-        response["valid"] = False
+        errors.append(
+            _("The end date must be greater than or equal to the start date.")
+        )
+        valid = False
 
     if end_datetime is not None:
         if end_datetime > datetime.today().date():
-            error_message = '<ul class="errorlist"><li>The end date cannot be in the future.</li></ul>'
-            response["message"] = error_message
-            response["valid"] = False
-    return JsonResponse(response)
+            errors.append(_("The end date cannot be in the future."))
+            valid = False
+
+    return JsonResponse(
+        {
+            "valid": valid,
+            "errors": errors,
+        }
+    )
 
 
 @login_required
@@ -1060,6 +1090,13 @@ def view_individual_payslip(request, employee_id, start_date, end_date):
     """
 
     payslip_data = payroll_calculation(employee_id, start_date, end_date)
+    if not payslip_data:
+        return HorillaRedirect(
+            request,
+            message=_(
+                "Payslip data not found for the specified employee and date range."
+            ),
+        )
     return render(
         request,
         "payroll/payslip/individual_payslip.html",
@@ -1233,6 +1270,7 @@ def payslip_export(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("payroll.add_allowance")
 def hx_create_allowance(request):
     """
@@ -1261,7 +1299,7 @@ def send_slip(request):
     ) or not len(email_backend.dynamic_from_email_with_display_name):
         messages.error(request, "Email server is not configured")
         if view:
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
         else:
             return redirect(reverse("payslip-list"))
 
@@ -1278,7 +1316,7 @@ def send_slip(request):
     mail_thread.start()
     messages.info(request, "Mail processing")
     if view:
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
     else:
         return redirect(reverse("payslip-list"))
 
@@ -1286,10 +1324,14 @@ def send_slip(request):
 @login_required
 @permission_required("payroll.add_allowance")
 def add_bonus(request):
-    employee_id = request.GET["employee_id"]
+    employee_id = request.GET.get("employee_id")
     payslip_id = request.GET.get("payslip_id")
+    if not employee_id or not payslip_id:
+        return HorillaRedirect(request, message=_("Missing required parameters."))
     if payslip_id != "None" and payslip_id:
-        instance = Payslip.objects.get(id=payslip_id)
+        instance = Payslip.find(payslip_id)
+        if not instance:
+            return HorillaRedirect(request, _("Payslip not found"))
         form = forms.PayslipAllowanceForm(
             initial={"employee_id": employee_id, "date": instance.start_date}
         )
@@ -1323,8 +1365,11 @@ def add_bonus(request):
                         start_date=instance.start_date,
                         end_date=instance.end_date,
                     ).first()
-                    return HttpResponse(
-                        f"<script>window.location.href='/payroll/view-payslip/{payslip.id}'</script>"
+                    return HorillaRedirect(
+                        request,
+                        redirect_to=reverse(
+                            "view-payslip", kwargs={"payslip_id": payslip.id}
+                        ),
                     )
                 else:
                     messages.warning(
@@ -1333,7 +1378,7 @@ def add_bonus(request):
                             "No active contract found for  {} during this payslip period"
                         ).format(employee),
                     )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -1345,8 +1390,10 @@ def add_bonus(request):
 @login_required
 @permission_required("payroll.add_deduction")
 def add_deduction(request):
-    employee_id = request.GET["employee_id"]
+    employee_id = request.GET.get("employee_id")
     payslip_id = request.GET.get("payslip_id")
+    if not employee_id or not payslip_id:
+        return HorillaRedirect(request, message=_("Missing required parameters."))
     instance = Payslip.objects.get(id=payslip_id)
 
     if request.method == "POST":
@@ -1381,8 +1428,10 @@ def add_deduction(request):
                 start_date=instance.start_date,
                 end_date=instance.end_date,
             ).first()
-            return HttpResponse(
-                f"<script>window.location.href='/payroll/view-payslip/{payslip.id}'</script>"
+
+            return HorillaRedirect(
+                request,
+                redirect_to=reverse("view-payslip", kwargs={"payslip_id": payslip.id}),
             )
 
     else:
@@ -1445,7 +1494,7 @@ def create_loan(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Loan created/updated")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request, "payroll/loan/form.html", {"form": form, "instance_id": instance_id}
     )
@@ -1457,8 +1506,12 @@ def view_installments(request):
     """
     View install ments
     """
-    loan_id = request.GET["loan_id"]
-    loan = LoanAccount.objects.get(id=loan_id)
+    loan_id = request.GET.get("loan_id")
+    if not loan_id:
+        return HorillaRedirect(request, message=_("Missing required parameters."))
+    loan = LoanAccount.find(loan_id)
+    if not loan:
+        return HorillaRedirect(request, message=_("Loan not found."))
     installments = loan.deduction_ids.all()
 
     requests_ids_json = request.GET.get("instances_ids")
@@ -1511,10 +1564,20 @@ def delete_loan(request):
 def edit_installment_amount(request):
     loan_id = request.GET.get("loan_id")
     ded_id = request.GET.get("ded_id")
-    value = float(request.POST.get("amount")) if request.POST.get("amount") else 0
+    amount_raw = request.POST.get("amount")
+    if not loan_id or not ded_id or not amount_raw:
+        return HorillaRedirect(request, message=_("Missing required parameters."))
+    try:
+        value = float(amount_raw) if amount_raw else 0.0
+        if not math.isfinite(value):
+            value = 0.0
+    except (TypeError, ValueError):
+        value = 0.0
 
     loans = LoanAccount.objects.filter(id=loan_id)
     loan = loans.first()
+    if not loan:
+        return HorillaRedirect(request, message=_("Loan not found."))
     deductions = loan.deduction_ids.all().order_by("one_time_date")
     deduction = deductions.filter(id=ded_id).first()
     deductions_before = deductions.filter(one_time_date__lt=deduction.one_time_date)
@@ -1698,7 +1761,7 @@ def create_reimbursement(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Reimbursement saved successfully")
-            return HttpResponse(status=204, headers={"HX-Refresh": "true"})
+            return HorillaRedirect(request)
     else:
         form = forms.ReimbursementForm(instance=instance)
 
@@ -1760,6 +1823,12 @@ def get_assigned_leaves(request):
     This method is used to return assigned leaves of the employee
     in Json
     """
+    emp_id = request.GET.get("employeeId")
+    if not emp_id:
+        messages.error(request, "Missing required parameters.")
+        return JsonResponse(
+            {"error": "Missing required parameters: employeeId"}, status=400
+        )
     if apps.is_installed("leave"):
         AvailableLeave = get_horilla_model_class(
             app_label="leave", model="availableleave"
@@ -1789,7 +1858,9 @@ def approve_reimbursements(request):
     This method is used to approve or reject the reimbursement request
     """
     ids = request.GET.getlist("ids")
-    status = request.GET["status"]
+    status = request.GET.get("status")
+    if not status:
+        return HorillaRedirect(request, message=_("Missing required parameters."))
     if status == "canceled":
         status = "rejected"
     amount = (
@@ -1874,7 +1945,9 @@ def reimbursement_individual_view(request, instance_id):
     """
     This method is used to render the individual view of reimbursement object
     """
-    reimbursement = Reimbursement.objects.get(id=instance_id)
+    reimbursement = Reimbursement.find(instance_id)
+    if not reimbursement:
+        return HorillaRedirect(request, message=_("Reimbursement request not found."))
     requests_ids_json = request.GET.get("instances_ids")
     if requests_ids_json:
         requests_ids = json.loads(requests_ids_json)
@@ -1898,7 +1971,9 @@ def reimbursement_attachments(request, instance_id):
     """
     This method is used to render all the attachements under the reimbursement object
     """
-    reimbursement = Reimbursement.objects.get(id=instance_id)
+    reimbursement = Reimbursement.find(instance_id)
+    if not reimbursement:
+        return HorillaRedirect(request, message=_("Reimbursement request not found."))
     return render(
         request,
         "payroll/reimbursement/attachments.html",
@@ -1919,6 +1994,7 @@ def delete_attachments(request, _reimbursement_id):
 
 
 @login_required
+@hx_request_required
 @permission_required("payroll.view_payslip")
 def get_contribution_report(request):
     """

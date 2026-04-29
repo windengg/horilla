@@ -16,7 +16,7 @@ from attendance.forms import AttendanceOverTimeExportForm, AttendanceOverTimeFor
 from attendance.models import AttendanceOverTime
 from base.decorators import manager_can_enter
 from base.methods import choosesubordinates, filtersubordinates, is_reportingmanager
-from horilla_views.cbv_methods import login_required
+from horilla_views.cbv_methods import hx_request_required, login_required
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
     HorillaFormView,
@@ -52,6 +52,7 @@ class HourAccountList(HorillaListView):
 
         if self.request.user.has_perm("attendance.add_attendanceovertime"):
             self.action_method = "hour_actions"
+            self.option_method = "hour_options"
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -182,6 +183,7 @@ class HourAccountNav(HorillaNavView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 class HourExportView(TemplateView):
     """
     For candidate export

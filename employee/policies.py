@@ -33,6 +33,7 @@ from employee.models import (
     PolicyMultipleFile,
 )
 from horilla.decorators import hx_request_required, login_required, permission_required
+from horilla.http.response import HorillaRedirect
 from horilla_auth.models import HorillaUser
 from notifications.signals import notify
 
@@ -134,15 +135,19 @@ def add_attachment(request):
     """
     This method is used to add attachment to policy
     """
+    policy = Policy.find(request.GET.get("policy_id"))
+    if not policy:
+        return HorillaRedirect(
+            request, message=_("No Policy found matching the query.")
+        )
+
     files = request.FILES.getlist("files")
-    policy_id = request.GET["policy_id"]
     attachments = []
     for file in files:
         attachment = PolicyMultipleFile()
         attachment.attachment = file
         attachment.save()
         attachments.append(attachment)
-    policy = Policy.objects.get(id=policy_id)
     policy.attachments.add(*attachments)
     messages.success(request, "Attachments added")
     return render(request, "policies/attachments.html", {"policy": policy})
@@ -154,9 +159,13 @@ def remove_attachment(request):
     """
     This method is used to remove the attachments
     """
+    policy = Policy.find(request.GET.get("policy_id"))
+    if not policy:
+        return HorillaRedirect(
+            request, message=_("No Policy found matching the query.")
+        )
+
     ids = request.GET.getlist("ids")
-    policy_id = request.GET["policy_id"]
-    policy = Policy.objects.get(id=policy_id)
     PolicyMultipleFile.objects.filter(id__in=ids).delete()
     return render(request, "policies/attachments.html", {"policy": policy})
 
@@ -166,8 +175,12 @@ def get_attachments(request):
     """
     This method is used to view all the attachments inside the policy
     """
-    policy = request.GET["policy_id"]
-    policy = Policy.objects.get(id=policy)
+    policy = Policy.find(request.GET.get("policy_id"))
+    if not policy:
+        return HorillaRedirect(
+            request, message=_("No Policy found matching the query.")
+        )
+
     return render(request, "policies/attachments.html", {"policy": policy})
 
 
@@ -236,19 +249,6 @@ def get_action_type_delete(action_id):
     return action.action_type
 
 
-def employee_account_block_unblock(emp_id, result):
-
-    employee = get_object_or_404(Employee, id=emp_id)
-    if not employee:
-        return redirect(disciplinary_actions)
-    user = get_object_or_404(HorillaUser, id=employee.employee_user_id.id)
-    if not user:
-        return redirect(disciplinary_actions)
-    user.is_active = result
-    user.save()
-    return HttpResponse("<script>window.location.reload()</script>")
-
-
 @login_required
 @hx_request_required
 @permission_required("employee.add_disciplinaryaction")
@@ -288,7 +288,7 @@ def create_actions(request):
             )
         dis = DisciplinaryAction.objects.all()
         if len(dis) == 1:
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request, "disciplinary_actions/form.html", {"form": form, "dynamic": dynamic}
@@ -415,7 +415,7 @@ def delete_actions(request, action_id):
 
     if dis_actions.exists():
         return redirect(reverse("disciplinary-actions-list"))
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -423,9 +423,8 @@ def action_type_details(request):
     """
     This method is used to get the action type by the selection of title in the form.
     """
-    action_id = request.POST["action_type"]
-    action = Actiontype.objects.get(id=action_id)
-    action_type = action.action_type
+    action = Actiontype.find(request.POST.get("action_type"))
+    action_type = action.action_type if action else ""
     return JsonResponse({"action_type": action_type})
 
 
@@ -434,7 +433,7 @@ def action_type_name(request):
     """
     This method is used to get the action type name by the selection of type in the form.
     """
-    action_type = request.POST["action_type"]
+    action_type = request.POST.get("action_type")
     return JsonResponse({"action_type": action_type})
 
 
@@ -466,6 +465,7 @@ def disciplinary_filter_view(request):
 
 
 @login_required
+@hx_request_required
 def search_disciplinary(request):
     """
     This method is used to search in Disciplinary Actions

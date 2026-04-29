@@ -444,6 +444,15 @@ class Attendance(HorillaModel):
             context={"instance": self},
         )
 
+    def request_options(self):
+        """
+        This method for get custom options for request.
+        """
+        return render_template(
+            path="cbv/attendance_request/attendance_request_option.html",
+            context={"instance": self},
+        )
+
     def validate_detail_view(self):
         """
         detail view of validate tab
@@ -714,10 +723,12 @@ class Attendance(HorillaModel):
                 "at_work_second",
                 "approved_overtime_second",
                 "minimum_hour",
+                "attendance_overtime_approve",
             ).get(pk=self.pk)
 
             old_work = old.at_work_second or 0
             old_approved_ot = old.approved_overtime_second or 0
+            old_approved_flag = old.attendance_overtime_approve or False
 
             old_min = strtime_seconds(old.minimum_hour)
             old_pending_today = max(0, old_min - old_work)
@@ -725,10 +736,18 @@ class Attendance(HorillaModel):
             old_work = 0
             old_approved_ot = 0
             old_pending_today = 0
+            old_approved_flag = False
 
         self.update_attendance_overtime()
         self.adjust_minimum_hour()
         self.handle_overtime_conditions()
+
+        if self.attendance_overtime_approve and not old_approved_flag:
+            self.approved_overtime_second = self.overtime_second
+        elif not self.attendance_overtime_approve:
+            self.approved_overtime_second = 0
+        else:
+            self.approved_overtime_second = old_approved_ot
 
         new_work = self.at_work_second or 0
         new_approved_ot = self.approved_overtime_second or 0
@@ -1055,6 +1074,17 @@ class AttendanceOverTime(HorillaModel):
 
         return render_template(
             path="cbv/hour_account/hour_actions.html",
+            context={"instance": self},
+        )
+
+    def hour_options(self):
+        """
+        options in hour account
+
+        """
+
+        return render_template(
+            path="cbv/hour_account/hour_options.html",
             context={"instance": self},
         )
 

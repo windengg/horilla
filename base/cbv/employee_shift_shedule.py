@@ -13,6 +13,7 @@ from django.utils.translation import gettext_lazy as _
 from base.filters import EmployeeShiftFilter, EmployeeShiftScheduleFilter
 from base.forms import EmployeeShiftScheduleForm
 from base.models import EmployeeShiftSchedule
+from horilla.http.response import HorillaRedirect
 from horilla_views.cbv_methods import login_required, permission_required
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
@@ -85,7 +86,7 @@ class EmployeeShiftSheduleCreateForm(HorillaFormView):
                     self.request,
                     _("Employee Shift Schedule has been created successfully!"),
                 )
-            return self.HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(self.request)
         return super().form_valid(form)
 
 
@@ -148,6 +149,12 @@ class EmployeeShiftSheduleDetailView(HorillaDetailedView):
     ]
 
     action_method = "detail_actions_col"
+
+    def dispatch(self, request, *args, **kwargs):
+        if not EmployeeShiftSchedule.objects.filter(id=kwargs.get("pk")).exists():
+            messages.error(request, _("Shift schedule not found."))
+            return HorillaRedirect(request)
+        return super().dispatch(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

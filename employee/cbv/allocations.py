@@ -28,7 +28,12 @@ from employee.methods.methods import get_model_class
 from employee.models import Employee, EmployeeBankDetails, EmployeeWorkInformation
 from employee.models import models as django_models
 from horilla.horilla_middlewares import _thread_locals
-from horilla_views.cbv_methods import login_required, render_template
+from horilla.http import HorillaRedirect
+from horilla_views.cbv_methods import (
+    hx_request_required,
+    login_required,
+    render_template,
+)
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
     HorillaFormView,
@@ -429,6 +434,7 @@ class BankFormView(HorillaFormView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(
     all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
 )
@@ -454,6 +460,7 @@ if app_installed("leave"):
     )
 
     @method_decorator(login_required, name="dispatch")
+    @method_decorator(hx_request_required, name="dispatch")
     @method_decorator(
         all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
     )
@@ -739,6 +746,7 @@ if app_installed("asset"):
     """
             )
 
+    @hx_request_required
     def return_allocation(request, *args, **kwargs):
         """
         Return allocation method
@@ -764,6 +772,7 @@ if app_installed("asset"):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(
     all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
 )
@@ -776,6 +785,7 @@ class GroupsView(TemplateView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 @method_decorator(
     all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
 )
@@ -788,7 +798,7 @@ class Groups(TemplateView):
 
     def get(self, request, *args, **kwargs):
         context = {}
-        employees = Employee.objects.filter(id=request.GET["instance_id"])
+        employees = Employee.objects.filter(id=request.GET.get("instance_id"))
         emoloyee = employees.first()
         context["employee"] = emoloyee
         permissions = []
@@ -835,7 +845,9 @@ class GroupAssignView(TemplateView):
         Get
         """
         employee_id = request.GET.get("employee")
-        employee = Employee.objects.get(id=employee_id)
+        employee = Employee.objects.filter(id=employee_id).first()
+        if not employee:
+            return HorillaRedirect(request, message=_("Employee not found"))
         groups = employee.employee_user_id.groups.all()
         form = AddToUserGroupForm(
             initial={
@@ -901,6 +913,7 @@ if app_installed("payroll"):
     Allowance.allowance_allocation_metod = allowance_allocation_metod
 
     @method_decorator(login_required, name="dispatch")
+    @method_decorator(hx_request_required, name="dispatch")
     @method_decorator(
         all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
     )
@@ -911,6 +924,7 @@ if app_installed("payroll"):
 
         template_name = "cbv/allocations/payroll/allowance/allowance_view.html"
 
+    @method_decorator(login_required, name="dispatch")
     class AllowanceList(AllowanceListView):
         """
         AllowanceList
@@ -1008,6 +1022,7 @@ if app_installed("payroll"):
     Deduction.deduction_allocation_metod = deduction_allocation_metod
 
     @method_decorator(login_required, name="dispatch")
+    @method_decorator(hx_request_required, name="dispatch")
     @method_decorator(
         all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
     )
@@ -1137,6 +1152,21 @@ class Summary(TemplateView):
     """
 
     template_name = "cbv/allocations/summary.html"
+
+    def get(self, request, *args, **kwargs):
+        instance_id = request.GET.get("instance_id")
+
+        if not instance_id:
+            return HorillaRedirect(request, message=_("Employee ID missing."))
+
+        try:
+            Employee.objects.get(pk=instance_id)
+        except Employee.DoesNotExist:
+            return HorillaRedirect(
+                request, message=_("No Employee found matching the query.")
+            )
+
+        return super().get(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

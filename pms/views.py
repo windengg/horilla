@@ -46,6 +46,8 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.group_by import group_by_queryset
+from horilla.http.response import HorillaRedirect
+from horilla.methods import handle_no_permission
 from horilla_auth.models import HorillaUser
 from horilla_automations.methods.methods import generate_choices
 from horilla_automations.methods.serialize import serialize_form
@@ -184,7 +186,7 @@ def objective_creation(request):
         objective_form = ObjectiveForm(request.POST)
         if objective_form.is_valid():
             obj_form_save(request, objective_form)
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {
         "objective_form": objective_form,
         "p_form": PeriodForm(),
@@ -272,7 +274,7 @@ def objective_update(request, obj_id):
                 request,
                 _("Objective %(objective)s Updated") % {"objective": instance},
             )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {"objective_form": objective_form, "k_form": KRForm(), "update": True}
 
     return render(request, "okr/objective_creation.html", context)
@@ -401,7 +403,7 @@ def kr_create_or_update(request, kr_id=None):
                     _("Key result %(key_result)s updated successfully")
                     % {"key_result": instance},
                 )
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
         else:
             form = KRForm(request.POST)
@@ -412,7 +414,7 @@ def kr_create_or_update(request, kr_id=None):
                     _("Key result %(key_result)s created successfully")
                     % {"key_result": instance},
                 )
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
     return render(request, "okr/key_result/real_kr_form.html", {"form": form})
 
@@ -428,6 +430,11 @@ def archive_key_result(request, pk):
     Returns:
     """
     key_result = KeyResult.find(pk)
+    if not key_result:
+        return HorillaRedirect(
+            request, message=_("No Key Result found matching the query.")
+        )
+
     key_result.is_active = not key_result.is_active
     key_result.save()
     message = (
@@ -497,7 +504,7 @@ def add_assignees(request, obj_id):
                 request,
                 _("Objective %(objective)s Updated") % {"objective": objective},
             )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -507,6 +514,7 @@ def add_assignees(request, obj_id):
 
 
 @login_required
+@hx_request_required
 @manager_can_enter(perm="pms.delete_employeeobjective")
 def objective_delete(request, obj_id):
     """
@@ -530,9 +538,8 @@ def objective_delete(request, obj_id):
                 _("You can't delete objective %(objective)s,related entries exists")
                 % {"objective": objective},
             )
-    except EmployeeObjective.DoesNotExist:
-        messages.error(request, _("Objective not found."))
-    # return redirect(reverse("objective-list-view"))
+    except Objective.DoesNotExist:
+        messages.error(request, _("No Objective found matching the query."))
     return HttpResponse(
         "<script> $('.reload-record').click(); $('#reloadMessagesButton').click();</script>"
     )
@@ -771,8 +778,12 @@ def objective_detailed_view(request, obj_id, **kwargs):
         return:
             objects to objective_detailed_view
     """
+    objective = Objective.find(obj_id)
+    if not objective:
+        return HorillaRedirect(
+            request, message=_("No Objective found matching the query.")
+        )
 
-    objective = Objective.objects.get(id=obj_id)
     emp_objectives = EmployeeObjective.objects.filter(
         objective_id=objective, archive=False
     )
@@ -852,7 +863,7 @@ def objective_detailed_view_activity(request, id):
         return render(request, "okr/objective_detailed_view_activity.html", context)
     else:
         messages.info(request, _("You dont have permission."))
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -1054,7 +1065,12 @@ def objective_archive(request, id):
         return:
             redirect to objective_list_view
     """
-    objective = Objective.objects.get(id=id)
+    objective = Objective.find(id)
+    if not objective:
+        return HorillaRedirect(
+            request, message=_("No Objective found matching the query.")
+        )
+
     if objective.archive:
         objective.archive = False
         objective.save()
@@ -1130,7 +1146,7 @@ def create_employee_objective(request):
                         start_date=emp_obj.start_date,
                     )
             messages.success(request, _("Employee objective created successfully"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {"form": form, "k_form": KRForm(), "emp_obj": True}
     return render(
         request, "okr/emp_objective/emp_objective_create_form.html", context=context
@@ -1140,7 +1156,13 @@ def create_employee_objective(request):
 @login_required
 def get_objective_keyresults(request):
     obj_id = request.GET.get("objective_id")
-    objective = Objective.objects.filter(id=obj_id).first()
+    objective = Objective.find(obj_id)
+    if not objective:
+
+        return HorillaRedirect(
+            request, message=_("No Objective found matching the query.")
+        )
+
     keyresults = objective.key_result_id.all()
     form = EmployeeObjectiveCreateForm(initial={"key_result_id": keyresults})
     context = {"form": form, "k_form": KRForm(), "emp_obj": True}
@@ -1172,12 +1194,12 @@ def update_employee_objective(request, emp_obj_id):
                 emp_obj = form.save(commit=False)
                 emp_obj.save()
                 messages.success(request, _("Employee objective Updated successfully"))
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         context = {"form": form, "k_form": KRForm()}
         return render(request, "okr/emp_objective_form.html", context=context)
     else:
         messages.info(request, _("You don't have permission."))
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -1190,8 +1212,11 @@ def archive_employee_objective(request, emp_obj_id):
         return:
             redirect to detailed of employee objective
     """
-    emp_objective = EmployeeObjective.objects.get(id=emp_obj_id)
-    obj_id = emp_objective.objective_id.id
+    emp_objective = EmployeeObjective.find(emp_obj_id)
+    if not emp_objective:
+        return HorillaRedirect(
+            request, message=_("No Employee Objective found matching the query.")
+        )
 
     if emp_objective.archive:
         emp_objective.archive = False
@@ -1205,7 +1230,7 @@ def archive_employee_objective(request, emp_obj_id):
         return HttpResponse(
             "<script> $('.reload-record').click(); $('#reloadMessagesButton').click();</script>"
         )
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1218,7 +1243,12 @@ def delete_employee_objective(request, emp_obj_id):
         return:
             redirect to detailed of employee objective
     """
-    emp_objective = EmployeeObjective.objects.get(id=emp_obj_id)
+    emp_objective = EmployeeObjective.find(emp_obj_id)
+    if not emp_objective:
+        return HorillaRedirect(
+            request, message=_("No Employee Objective found matching the query.")
+        )
+
     single_view = request.GET.get("single_view")
     if emp_objective.employee_key_result.exists():
         messages.warning(
@@ -1230,10 +1260,7 @@ def delete_employee_objective(request, emp_obj_id):
         emp_objective.delete()
         objective.assignees.remove(employee)
         messages.success(request, _("Objective deleted successfully!."))
-    if not single_view:
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
-    else:
-        return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1353,7 +1380,7 @@ def key_result_creation(request, obj_id, obj_type):
         key_result_form = KeyResultForm(
             employee=employee, initial={"start_date": start_date, "end_date": end_date}
         )
-    else:
+    elif obj_type == "multiple":
         objective_ids = json.loads(obj_id)
         for objective_id in objective_ids:
             objective = EmployeeObjective.objects.filter(id=objective_id).first()
@@ -1362,6 +1389,8 @@ def key_result_creation(request, obj_id, obj_type):
         key_result_form = KeyResultForm(
             employee=employee, initial={"start_date": start_date, "end_date": end_date}
         )
+    else:
+        return HorillaRedirect(request, message=_("Invalid parameters"))
     context = {
         "key_result_form": key_result_form,
         "objective_id": obj_id,
@@ -1444,12 +1473,7 @@ def key_result_creation_htmx(request, id):
             form.employee_objective_id = objective
             form.save()
             messages.success(request, _("Key result created"))
-            response = render(
-                request, "okr/key_result/key_result_creation_htmx.html", context
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
         context["key_result_form"] = form_key_result
     return render(request, "okr/key_result/key_result_creation_htmx.html", context)
 
@@ -1477,10 +1501,7 @@ def key_result_update(request, id):
         if key_result_form.is_valid():
             key_result_form.save()
             messages.info(request, _("Key result updated"))
-            response = render(request, "okr/key_result/key_result_update.html", context)
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
         else:
             context["key_result_form"] = key_result_form
     return render(request, "okr/key_result/key_result_update.html", context)
@@ -1609,11 +1630,7 @@ def feedback_update(request, id):
     feedback_started = Answer.objects.filter(feedback_id=feedback)
     context = {"feedback_form": form}
     if feedback_started:
-        messages.error(request, _("Ongoing feedback is not editable!."))
-        response = render(request, "feedback/feedback_update.html", context)
-        return HttpResponse(
-            response.content.decode("utf-8") + "<script>location.reload();</script>"
-        )
+        return HorillaRedirect(request, message=_("Ongoing feedback is not editable!."))
 
     if request.method == "POST":
         form = FeedbackForm(request.POST, instance=feedback)
@@ -1635,10 +1652,7 @@ def feedback_update(request, id):
             feedback = form.save()
             messages.info(request, _("Feedback updated successfully!."))
             send_feedback_notifications(request, feedback)
-            response = render(request, "feedback/feedback_update.html", context)
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
         else:
             context["feedback_form"] = form
     return render(request, "feedback/feedback_update.html", context)
@@ -1823,7 +1837,12 @@ def feedback_detailed_view(request, id, **kwargs):
     Returns:
         it will return the feedback object to feedback_detailed_view template .
     """
-    feedback = Feedback.objects.get(id=id)
+    feedback = Feedback.find(id)
+    if not feedback:
+        return HorillaRedirect(
+            request, message=_("No Feedback found matching the query.")
+        )
+
     is_have_perm = check_permission_feedback_detailed_view(
         request, feedback, "pms.view_feedback"
     )
@@ -1848,14 +1867,7 @@ def feedback_detailed_view(request, id, **kwargs):
             "today": datetime.datetime.today().date(),
         }
         return render(request, "feedback/feedback_detailed_view.html", context)
-    else:
-        messages.info(request, _("You dont have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-        script = f'<script>window.location.href = "{previous_url}"</script>'
-        key = "HTTP_HX_REQUEST"
-        if key in request.META.keys():
-            return render(request, "decorator_404.html")
-        return HttpResponse(script)
+    return handle_no_permission(request)
 
 
 @login_required
@@ -1868,8 +1880,15 @@ def feedback_detailed_view_answer(request, id, emp_id):
     Returns:
         it will return the answers .
     """
+    feedback = Feedback.find(id)
     employee = Employee.objects.filter(id=emp_id).first()
-    feedback = Feedback.objects.filter(id=id).first()
+    if not feedback or not employee:
+        return HorillaRedirect(
+            request,
+            message=_("No %(class_name)s found matching the query.")
+            % {"class_name": "Feedback" if not feedback else "Employee"},
+        )
+
     is_have_perm = check_permission_feedback_detailed_view(
         request, feedback, "pms.view_feedback"
     )
@@ -1883,14 +1902,7 @@ def feedback_detailed_view_answer(request, id, emp_id):
             "kr_feedbacks": kr_feedbacks,
         }
         return render(request, "feedback/feedback_detailed_view_answer.html", context)
-    else:
-        messages.info(request, _("You dont have permission."))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-        script = f'<script>window.location.href = "{previous_url}"</script>'
-        key = "HTTP_HX_REQUEST"
-        if key in request.META.keys():
-            return render(request, "decorator_404.html")
-        return HttpResponse(script)
+    return handle_no_permission(request)
 
 
 @login_required
@@ -1903,7 +1915,11 @@ def feedback_answer_get(request, id, **kwargs):
         it will redirect to feedaback_answer.html .
     """
 
-    feedback = Feedback.objects.get(id=id)
+    feedback = Feedback.find(id)
+    if not feedback:
+        return HorillaRedirect(
+            request, message=_("No Feedback found matching the query.")
+        )
 
     # check if the feedback start_date is not started yet
     if feedback.start_date > datetime.date.today():
@@ -1963,10 +1979,14 @@ def feedback_answer_post(request, id):
     Returns:
         it will redirect to feedback_list_view if the form was success full.
     """
+    feedback = Feedback.find(id)
+    if not feedback:
+        return HorillaRedirect(
+            request, message=_("No Feedback found matching the query.")
+        )
 
     user = request.user
     employee = Employee.objects.filter(employee_user_id=user).first()
-    feedback = Feedback.objects.get(id=id)
     question_template = feedback.question_template_id
     questions = question_template.question.all()
 
@@ -2009,9 +2029,14 @@ def feedback_answer_view(request, id, **kwargs):
         it will return feedback answer object to feedback_answer_view.
     """
 
+    feedback = Feedback.find(id)
+    if not feedback:
+        return HorillaRedirect(
+            request, message=_("No Feedback found matching the query.")
+        )
+
     user = request.user
     employee = Employee.objects.filter(employee_user_id=user).first()
-    feedback = Feedback.objects.get(id=id)
     answers = Answer.objects.filter(feedback_id=feedback, employee_id=employee)
     key_result_feedback = KeyResultFeedback.objects.filter(
         feedback_id=feedback, employee_id=employee
@@ -2040,7 +2065,7 @@ def feedback_delete(request, id):
         it will redirect to  feedback_list_view.
     """
     try:
-        feedback = Feedback.objects.filter(id=id).first()
+        feedback = Feedback.objects.get(id=id)
         answered = Answer.objects.filter(feedback_id=feedback).first()
         if (
             feedback.status == "Closed"
@@ -2063,10 +2088,10 @@ def feedback_delete(request, id):
             return redirect(reverse("feedback-view"))
 
     except Feedback.DoesNotExist:
-        messages.error(request, _("Feedback not found."))
+        error_message = _("No Feedback found matching the query.")
     except ProtectedError:
-        messages.error(request, _("Related entries exists"))
-    return redirect(reverse("feedback-view"))
+        error_message = _("Related entries exists")
+    return HorillaRedirect(request, message=error_message)
 
 
 @login_required
@@ -2146,7 +2171,7 @@ def get_feedback_overview(request, obj_id):
         messages.info(request, _("You dont have permission."))
     else:
         messages.info(request, _("Feedback does not exist."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -2158,7 +2183,11 @@ def feedback_archive(request, id):
         id(int): primarykey of feedback
     """
 
-    feedback = Feedback.objects.get(id=id)
+    feedback = Feedback.find(id)
+    if not feedback:
+        return HorillaRedirect(
+            request, message=_("No Feedback found matching the query.")
+        )
 
     if feedback.archive:
         feedback.archive = False
@@ -2273,10 +2302,10 @@ def question_creation(request, id):
 
             if obj_question.question_type == "4":
                 # checking the question type is multichoice
-                option_a = request.POST.get("option_a")
-                option_b = request.POST.get("option_b")
-                option_c = request.POST.get("option_c")
-                option_d = request.POST.get("option_d")
+                option_a = form.cleaned_data["option_a"]
+                option_b = form.cleaned_data["option_b"]
+                option_c = form.cleaned_data["option_c"]
+                option_d = form.cleaned_data["option_d"]
                 QuestionOptions(
                     question_id=obj_question,
                     option_a=option_a,
@@ -2302,7 +2331,12 @@ def question_view(request, id):
     Returns:
         it will redirect to  question_template_detailed_view.
     """
-    question_template = QuestionTemplate.objects.get(id=id)
+    question_template = QuestionTemplate.find(id)
+    if not question_template:
+        return HorillaRedirect(
+            request, message=_("No Question Template found matching the query.")
+        )
+
     question_formset = modelformset_factory(Question, form=QuestionForm, extra=0)
 
     questions = question_template.question.all()
@@ -2405,17 +2439,15 @@ def question_delete(request, id):
         return HttpResponse("<script>reloadMessage();</script>")
 
     except Question.DoesNotExist:
-        messages.error(request, _("Question not found."))
+        error_msg = _("Question not found.")
     except IntegrityError:
-        messages.error(
-            request, _("Failed to delete question: Question template is in use.")
-        )
+        error_msg = _("Failed to delete question: Question template is in use.")
     except ProtectedError:
-        messages.error(request, _("Related entries exist."))
+        error_msg = _("Related entries exist.")
     except Exception as e:
-        messages.error(request, _(f"Unexpected error: {str(e)}"))
+        error_msg = _(f"Unexpected error: {str(e)}")
 
-    return HttpResponse("<script>window.location.reload();</script>")
+    return HorillaRedirect(request, message=error_msg)
 
 
 @login_required
@@ -2658,7 +2690,7 @@ def period_delete(request, period_id):
     except ProtectedError:
         messages.error(request, _("Related entries exists"))
     if target == "listContainer":
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
     return redirect("period-hx-view")
 
 
@@ -3098,7 +3130,7 @@ def anonymous_feedback_add(request):
                     )
                 except:
                     pass
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     else:
         form = AnonymousFeedbackForm()
 
@@ -3136,12 +3168,12 @@ def edit_anonymous_feedback(request, obj_id):
                 feedback = form.save(commit=False)
                 feedback.anonymous_feedback_id = anonymous_id
                 feedback.save()
-                return HttpResponse("<script>window.location.reload();</script>")
+                return HorillaRedirect(request)
         context = {"form": form, "create": False}
         return render(request, "anonymous/anonymous_feedback_form.html", context)
     else:
         messages.info(request, _("You are don't have permissions."))
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -3152,7 +3184,12 @@ def archive_anonymous_feedback(request, obj_id):
         id(int): primarykey of feedback
     """
 
-    feedback = AnonymousFeedback.objects.get(id=obj_id)
+    feedback = AnonymousFeedback.objects.filter(id=obj_id).first()
+    if not feedback:
+        return HorillaRedirect(
+            request, message=_("No Anonymous Feedback found matching the query.")
+        )
+
     # checking feedback owner
     if str(request.user.id) == feedback.anonymous_feedback_id or request.user.has_perm(
         "pms.anonymousfeedback"
@@ -3271,7 +3308,7 @@ def employee_keyresult_creation(request, emp_obj_id):
                         kwargs={"obj_id": emp_objective.objective_id.id},
                     ),
                 )
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         context = {
             "form": emp_key_result,
             "emp_objective": emp_objective,
@@ -3279,7 +3316,7 @@ def employee_keyresult_creation(request, emp_obj_id):
         return render(request, "okr/key_result/kr_form.html", context=context)
     else:
         messages.info(request, _("You are don't have permissions."))
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -3324,7 +3361,7 @@ def employee_keyresult_update(request, kr_id):
                     kwargs={"obj_id": emp_kr.employee_objective_id.objective_id.id},
                 ),
             )
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": emp_key_result,
@@ -3343,7 +3380,12 @@ def delete_employee_keyresult(request, kr_id):
         return:
             redirect to detailed of employee objective
     """
-    emp_kr = EmployeeKeyResult.objects.get(id=kr_id)
+    emp_kr = EmployeeKeyResult.objects.filter(id=kr_id).first()
+    if not emp_kr:
+        return HorillaRedirect(
+            request, message=_("No Employee Key Result found matching the query.")
+        )
+
     # employee = emp_kr.employee_id
     objective = emp_kr.employee_objective_id.objective_id
     emp_objective = emp_kr.employee_objective_id
@@ -3365,7 +3407,13 @@ def employee_keyresult_update_status(request, kr_id):
         return:
             redirect to detailed of employee objective
     """
-    emp_kr = EmployeeKeyResult.objects.get(id=kr_id)
+    emp_kr = EmployeeKeyResult.objects.filter(id=kr_id).first()
+    if not emp_kr:
+
+        return HorillaRedirect(
+            request, message=_("No Employee Key Result found matching the query.")
+        )
+
     if (
         request.user.has_perm("pms.change_objective")
         or request.user.has_perm("pms.change_employeeobjective")
@@ -3386,7 +3434,7 @@ def employee_keyresult_update_status(request, kr_id):
         )
 
     messages.info(request, "You dont have permission")
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -3593,6 +3641,7 @@ def create_meetings(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("pms.change_meetings")
 def archive_meetings(request, obj_id):
     """
@@ -3604,6 +3653,12 @@ def archive_meetings(request, obj_id):
         it will redirect to view_meetings.html .
     """
     meeting = Meetings.find(obj_id)
+    if not meeting:
+
+        return HorillaRedirect(
+            request, message=_("No Meetings found matching the query.")
+        )
+
     meeting.is_active = not meeting.is_active
     meeting.save()
     message = (
@@ -3616,6 +3671,7 @@ def archive_meetings(request, obj_id):
 
 
 @login_required
+@hx_request_required
 @permission_required("pms.change_meetings")
 def meeting_manager_remove(request, meet_id, manager_id):
     """
@@ -3626,7 +3682,13 @@ def meeting_manager_remove(request, meet_id, manager_id):
     Returns:
         it will redirect to view_meetings.html .
     """
-    meeting = Meetings.objects.filter(id=meet_id).first()
+    meeting = Meetings.find(meet_id)
+    if not meeting:
+
+        return HorillaRedirect(
+            request, message=_("No Meetings found matching the query.")
+        )
+
     meeting.manager.remove(manager_id)
     meeting.save()
     messages.success(
@@ -3636,6 +3698,8 @@ def meeting_manager_remove(request, meet_id, manager_id):
 
 
 @login_required
+@hx_request_required
+@permission_required("pms.change_meetings")
 def meeting_employee_remove(request, meet_id, employee_id):
     """
     This view is used to remove the employees from the meeting ,
@@ -3645,7 +3709,13 @@ def meeting_employee_remove(request, meet_id, employee_id):
     Returns:
         it will redirect to view_meetings.html .
     """
-    meeting = Meetings.objects.filter(id=meet_id).first()
+    meeting = Meetings.find(meet_id)
+    if not meeting:
+
+        return HorillaRedirect(
+            request, message=_("No Meetings found matching the query.")
+        )
+
     meeting.employee_id.remove(employee_id)
     meeting.save()
     messages.success(
@@ -3765,8 +3835,13 @@ def meeting_answer_post(request, id):
         it will redirect to view_meeting if the form was success full.
     """
 
+    meeting = Meetings.find(id)
+    if not meeting:
+        return HorillaRedirect(
+            request, message=_("No Meetings found matching the query.")
+        )
+
     employee = request.user.employee_get
-    meeting = Meetings.objects.get(id=id)
     question_template = meeting.question_template.question.all()
 
     if request.method == "POST":
@@ -3799,8 +3874,15 @@ def meeting_answer_view(request, id, emp_id, **kwargs):
         it will return meeting answer object to meeting_answer_view.
     """
 
+    meeting = Meetings.find(id)
     employee = Employee.objects.filter(id=emp_id).first()
-    meeting = Meetings.objects.get(id=id)
+    if not meeting or not employee:
+        return HorillaRedirect(
+            request,
+            message=_("No %(class_name)s found matching the query.")
+            % {"class_name": "Meetings" if not meeting else "Employee"},
+        )
+
     answers = MeetingsAnswer.objects.filter(meeting_id=meeting, employee_id=employee)
 
     context = {
@@ -3836,7 +3918,12 @@ def meeting_question_template_view(request, meet_id):
 
 @login_required
 def meeting_single_view(request, id):
-    meeting = Meetings.objects.get(id=id)
+    meeting = Meetings.find(id)
+    if not meeting:
+        return HorillaRedirect(
+            request, message=_("No Meetings found matching the query.")
+        )
+
     context = {"meeting": meeting}
     requests_ids_json = request.GET.get("requests_ids")
     if requests_ids_json:
@@ -3965,6 +4052,7 @@ def bonus_setting_form_values(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("pms.update_bonuspointsetting")
 def update_isactive_bonuspoint_setting(request, obj_id):
     """
@@ -3973,8 +4061,13 @@ def update_isactive_bonuspoint_setting(request, obj_id):
     - is_active: Boolean value representing the state of BonusPointSetting,
     - obj_id: Id of BonusPointSetting object.
     """
+    bonus_point_setting = BonusPointSetting.objects.filter(id=obj_id).first()
+    if not bonus_point_setting:
+        return HorillaRedirect(
+            request, message=_("No Bonus Point Setting found matching the query.")
+        )
+
     is_active = request.POST.get("is_active")
-    bonus_point_setting = BonusPointSetting.objects.get(id=obj_id)
     if is_active == "on":
         bonus_point_setting.is_active = True
         messages.success(request, _("Bonus point setting activated successfully."))

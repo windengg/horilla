@@ -47,6 +47,7 @@ from openpyxl.utils import get_column_letter
 
 from horilla.config import logger
 from horilla.horilla_middlewares import _thread_locals
+from horilla.methods import handle_no_permission
 from horilla_views.templatetags.generic_template_filters import getattribute
 
 FIELD_WIDGET_MAP = {
@@ -205,14 +206,64 @@ def permission_required(function, perm):
 
         if request.user.has_perm(perm):
             return function(self, *args, **kwargs)
+        return handle_no_permission(request)
+
+    return _function
+
+
+@decorator_with_arguments
+def owner_can_enter(
+    function,
+    perm: str,
+    model: object,
+    manager_access=False,
+    employee_field: str = "employee_id",
+):
+    """
+    CBV version of owner_can_enter.
+    Only the users with permission, or the owner, or employees manager can enter.
+    If manager_access:True then all the managers can enter.
+    """
+    from employee.models import Employee, EmployeeWorkInformation
+    from horilla.decorators import check_manager
+    from horilla.http import HorillaRedirect
+
+    def _function(self, *args, **kwargs):
+        request = getattr(_thread_locals, "request")
+        if not getattr(self, "request", None):
+            self.request = request
+
+        instance_id = None
+        if kwargs:
+            instance_id = kwargs[list(kwargs.keys())[0]]
+        elif hasattr(self, "kwargs") and self.kwargs:
+            instance_id = self.kwargs[list(self.kwargs.keys())[0]]
+
+        if model == Employee:
+            employee = Employee.objects.filter(id=instance_id).first()
         else:
-            messages.info(request, "You dont have permission.")
-            previous_url = request.META.get("HTTP_REFERER", "/")
-            key = "HTTP_HX_REQUEST"
-            if key in request.META.keys():
-                return render(request, "decorator_404.html")
-            script = f'<script>window.location.href = "{previous_url}"</script>'
-            return HttpResponse(script)
+            try:
+                obj = model.objects.filter(id=instance_id).first()
+                employee = getattr(obj, employee_field, None) if obj else None
+            except Exception as e:
+                messages.error(request, _("Sorry, something went wrong!"))
+                return HorillaRedirect(request)
+
+        can_enter = (
+            request.user.employee_get == employee
+            or request.user.has_perm(perm)
+            or check_manager(request.user.employee_get, employee)
+            or (
+                EmployeeWorkInformation.objects.filter(
+                    reporting_manager_id__employee_user_id=request.user
+                ).exists()
+                if manager_access
+                else False
+            )
+        )
+        if can_enter or not employee:
+            return function(self, *args, **kwargs)
+        return HorillaRedirect(request, message=_("You don't have permission."))
 
     return _function
 
@@ -228,13 +279,9 @@ def check_feature_enabled(function, feature_name, model_class: models.Model):
         enabled = getattr(general_setting, feature_name, False)
         if enabled:
             return function(self, request, *args, **kwargs)
-        messages.info(request, _("Feature is not enabled on the settings"))
-        previous_url = request.META.get("HTTP_REFERER", "/")
-        key = "HTTP_HX_REQUEST"
-        if key in request.META.keys():
-            return render(request, "decorator_404.html")
-        script = f'<script>window.location.href = "{previous_url}"</script>'
-        return HttpResponse(script)
+        return handle_no_permission(
+            request, message=_("Feature is not enabled on the settings")
+        )
 
     return _function
 

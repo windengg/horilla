@@ -127,10 +127,14 @@
   width: 100%;
 }
 .oh-modal ion-icon {
-    font-size: 1.5rem;
+  font-size: 1.5rem;
 }
 .oh-modal__dialog-body {
   padding: 0 1.75rem 1.75rem 1.75rem;
+}
+
+.oh-modal .oh-btn ion-icon {
+  font-size: 1rem !important;
 }
 
 .oh-modal__dialog-title {
@@ -1407,8 +1411,13 @@ input[type="file"] {
   justify-content: center;
   border-radius: 5px;
 }
+
 table .oh-btn-group {
   margin: 0 5px;
+}
+table .oh-btn-group a {
+  flex: 1 0 auto;
+  width: max-content !important;
 }
 
 .oh-btn-group > * {
@@ -1422,7 +1431,6 @@ table .oh-btn-group {
 }
 
 .oh-btn-group > *:last-child {
-  border-right: none;
   border-top-right-radius: 0.375rem;
   border-bottom-right-radius: 0.375rem;
 }
@@ -1603,8 +1611,8 @@ table .oh-btn-group {
 .oh-hover-btn__small ion-icon {
   font-size: 0.9rem;
 }
-.oh-hover-btn__main{
-  transition: .3s;
+.oh-hover-btn__main {
+  transition: 0.3s;
 }
 
 .oh-hover-btn__small:hover {
@@ -2374,12 +2382,18 @@ ul.errorlist ul.errorlist li {
   font-size: 0.85rem;
 }
 
+/* Hover-open disabled: the submenu panel now opens only on click via
+   the `.sidebox-active` class (see sidebar.html's delegated click
+   handler and global.css). This prevents the panel from popping open
+   whenever the cursor grazes a sidebar icon. */
+/*
 .sideboxmain:hover .sidebox {
   opacity: 1;
   visibility: visible;
   background: rgb(255 255 255 / 95%);
   backdrop-filter: blur(3px);
 }
+*/
 
 .sideboxmain {
   display: flex;
@@ -2507,9 +2521,9 @@ ul.errorlist ul.errorlist li {
   border-left: none;
 }
 
-.fixed-table td {
-  max-width: 0; /* This forces cells to respect their width constraints */
-}
+/* .fixed-table td {
+  max-width: 0;
+} */
 
 .oh-permission-table__collapse {
   border: none;
@@ -3078,7 +3092,7 @@ ul.errorlist ul.errorlist li {
   width: 50%;
   max-width: 1000px;
   box-shadow: rgba(0, 0, 0, 0.1) -4px 9px 25px -6px;
-  padding: 2rem;
+  padding: 1rem;
   display: none;
   z-index: 15;
 }
@@ -3839,7 +3853,8 @@ ion-icon {
   font-size: 0.9rem;
 }
 input[type="file"] {
-  border: 1px solid #656565 !important;
+  border: unset !important;
+  padding-bottom: 32px;
 }
 table .oh-input,
 table .oh-select,
@@ -3865,4 +3880,18 @@ a,
   border-radius: 6px !important;
   font-size: 0.85rem !important;
   border: 1px solid #efefef !important;
+}
+.ansbox {
+  border: 1px solid #ffffffff;
+  padding: 30px;
+  margin: 50px;
+  background: white;
+  border-radius: 10px;
+}
+.oh-activity-sidebar__header span {
+  display: flex;
+}
+
+.sha h3 {
+  text-align: left !important;
 }

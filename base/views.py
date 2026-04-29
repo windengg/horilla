@@ -29,17 +29,12 @@ from django.core.mail import EmailMessage, EmailMultiAlternatives
 from django.core.management import call_command
 from django.core.validators import validate_ipv46_address
 from django.db.models import ProtectedError, Q
-from django.http import (
-    FileResponse,
-    Http404,
-    HttpResponse,
-    HttpResponseRedirect,
-    JsonResponse,
-)
+from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
+from django.utils._os import safe_join
 from django.utils.decorators import method_decorator
 from django.utils.html import strip_tags
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -186,6 +181,7 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.group_by import group_by_queryset
+from horilla.http.response import HorillaRedirect
 from horilla.methods import get_horilla_model_class, remove_dynamic_url
 from horilla_audit.forms import HistoryTrackingFieldsForm
 from horilla_audit.models import AccountBlockUnblock, AuditTag, HistoryTrackingFields
@@ -328,7 +324,7 @@ def initialize_database(request):
                     request,
                     _("The password you entered is incorrect. Please try again."),
                 )
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         return render(request, "initialize_database/horilla_user.html")
     else:
         return redirect("/")
@@ -709,7 +705,7 @@ class HorillaPasswordResetView(PasswordResetView):
                 messages.success(
                     self.request, _("Password reset link sent successfully")
                 )
-                return HttpResponseRedirect(self.request.META.get("HTTP_REFERER", "/"))
+                return HorillaRedirect(self.request)
 
             return redirect(reverse_lazy("reset-send-success"))
 
@@ -735,7 +731,7 @@ class EmployeePasswordResetView(PasswordResetView):
                 is_default_backend = False
             if is_default_backend and not email_backend.configuration:
                 messages.error(self.request, _("Primary mail server is not configured"))
-                return HttpResponseRedirect(self.request.META.get("HTTP_REFERER", "/"))
+                return HorillaRedirect(self.request)
 
             username = form.cleaned_data["email"]
             user = HorillaUser.objects.filter(username=username).first()
@@ -756,11 +752,11 @@ class EmployeePasswordResetView(PasswordResetView):
                 )
             else:
                 messages.error(self.request, _("No user with the given username"))
-            return HttpResponseRedirect(self.request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(self.request)
 
         except Exception as e:
             messages.error(self.request, f"Something went wrong.....")
-            return HttpResponseRedirect(self.request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(self.request)
 
 
 setattr(PasswordResetConfirmView, "template_name", "reset_password.html")
@@ -936,7 +932,7 @@ def logout_user(request):
         <script>
             localStorage.clear();
         </script>
-        <meta http-equiv="refresh" content="0;url=/login">
+        <meta http-equiv="refresh" content="0;url=/login/">
     """
 
     return response
@@ -1129,7 +1125,7 @@ def user_group_table(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("User group created."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/auth/group_assign.html",
@@ -1150,25 +1146,31 @@ def update_group_permission(
     """
     This method is used to remove user permission.
     """
-    group_id = request.POST["id"]
-    instance = Group.objects.get(id=group_id)
+    group_id = request.POST.get("id")
+    instance = Group.objects.filter(id=group_id).first()
+    if not instance:
+        messages.error(request, _("Group not found"))
+        return JsonResponse({"message": "Group not found", "type": "danger"})
     form = UserGroupForm(request.POST, instance=instance)
     if form.is_valid():
         form.save()
-        return JsonResponse({"message": "Updated the permissions", "type": "success"})
+        messages.success(request, _("Updated the permissions"))
+        return JsonResponse({})
     if request.POST.get("name_update"):
         name = request.POST["name"]
         if len(name) > 3:
             instance.name = name
             instance.save()
+            messages.success(request, _("Name updated"))
             return JsonResponse({"message": "Name updated", "type": "success"})
-        return JsonResponse(
-            {"message": "At least 4 characters required", "type": "success"}
-        )
+        messages.info(request, _("At least 4 characters required"))
+        return JsonResponse({})
     perms = form.cleaned_data.get("permissions")
     if not perms:
         instance.permissions.clear()
-        return JsonResponse({"message": "All permission cleared", "type": "info"})
+        messages.info(request, _("All permission cleared"))
+        return JsonResponse({})
+    messages.error(request, _("Something went wrong"))
     return JsonResponse({"message": "Something went wrong", "type": "danger"})
 
 
@@ -1209,6 +1211,7 @@ def user_group(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("auth.view_group")
 def user_group_search(request):
     """
@@ -1253,6 +1256,8 @@ def group_assign(request):
     This method is used to assign user group to the users.
     """
     group_id = request.GET.get("group")
+    if not group_id:
+        return HorillaRedirect(request, message=_("Required parameters are missing"))
     form = AssignUserGroup(
         initial={
             "group": group_id,
@@ -1262,14 +1267,18 @@ def group_assign(request):
         }
     )
     if request.POST:
-        group_id = request.POST["group"]
+        group_id = request.POST.get("group")
+        if not group_id:
+            return HorillaRedirect(
+                request, message=_("Required parameters are missing")
+            )
         form = AssignUserGroup(
             {"group": group_id, "employee": request.POST.getlist("employee")}
         )
         if form.is_valid():
             form.save()
             messages.success(request, _("User group assigned."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/auth/group_user_assign.html",
@@ -1278,6 +1287,7 @@ def group_assign(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("auth.view_group")
 def group_assign_view(request):
     """
@@ -1321,7 +1331,7 @@ def user_group_permission_remove(request, pid, gid):
     group = Group.objects.get(id=1)
     permission = Permission.objects.get(id=2)
     group.permissions.remove(permission)
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1337,7 +1347,7 @@ def group_remove_user(request, uid, gid):
     group = Group.objects.get(id=gid)
     user = HorillaUser.objects.get(id=uid)
     group.user_set.remove(user)
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1391,7 +1401,7 @@ def object_delete(request, obj_id, **kwargs):
             redirect_path = redirect_path + "?" + previous_data
             return redirect(redirect_path)
         else:
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     if redirect_path:
         previous_data = request.GET.urlencode()
@@ -1406,7 +1416,7 @@ def object_delete(request, obj_id, **kwargs):
             return_part = kwargs.get("HttpResponse")
         return HttpResponse(f"{return_part}")
     else:
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -1437,11 +1447,7 @@ def object_duplicate(request, obj_id, **kwargs):
         original_object = model.objects.get(id=obj_id)
     except model.DoesNotExist:
         messages.error(request, f"{model._meta.verbose_name} object does not exist.")
-        if request.headers.get("HX-Request"):
-            return HttpResponse(status=204, headers={"HX-Refresh": "true"})
-        else:
-            current_url = request.META.get("HTTP_REFERER", "/")
-            return HttpResponseRedirect(current_url)
+        return HorillaRedirect(request)
 
     form = form_class(instance=original_object)
     search_words = (
@@ -1465,7 +1471,7 @@ def object_duplicate(request, obj_id, **kwargs):
             new_object = form.save(commit=False)
             new_object.id = None
             new_object.save()
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {
         kwargs.get("form_name", "form"): form,
         "obj_id": obj_id,
@@ -1568,6 +1574,7 @@ def mail_server_conf(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("base.view_dynamicemailconfiguration")
 def mail_server_test_email(request):
     instance_id = request.GET.get("instance_id")
@@ -1652,10 +1659,10 @@ def mail_server_test_email(request):
                 msg.send()
             except Exception as e:
                 messages.error(request, " ".join([_("Something went wrong :"), str(e)]))
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
             messages.success(request, _("Mail sent successfully"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/mail_server/form_email_test.html",
@@ -1669,34 +1676,42 @@ def mail_server_delete(request):
     """
     This method is used to delete mail server
     """
-    ids = request.GET.getlist("ids")
-    # primary_mail_check
-    delete = True
-    for id in ids:
-        emailconfig = DynamicEmailConfiguration.objects.filter(id=id).first()
-        if emailconfig.is_primary:
-            delete = False
-    if delete:
-        DynamicEmailConfiguration.objects.filter(id__in=ids).delete()
-        messages.success(request, "Mail server configuration deleted")
-        return HttpResponse("<script>window.location.reload()</script>")
-    else:
-        if DynamicEmailConfiguration.objects.all().count() == 1:
-            messages.warning(
-                request,
-                "You have only 1 Mail server configuration that can't be deleted",
-            )
-            return HttpResponse("<script>window.location.reload()</script>")
-        else:
-            mails = DynamicEmailConfiguration.objects.all().exclude(is_primary=True)
-            return render(
-                request,
-                "base/mail_server/replace_mail.html",
-                {
-                    "mails": mails,
-                    "title": _("Can't Delete"),
-                },
-            )
+    id = request.GET.get("ids")
+
+    if not id:
+        return HorillaRedirect(request, message=_("Missing required parameter"))
+
+    emailconfig = DynamicEmailConfiguration.objects.filter(id=id).first()
+    if not emailconfig:
+        return HorillaRedirect(
+            request, message=_("Mail server configuration not found")
+        )
+
+    # Prevent deleting last remaining config
+    total_count = DynamicEmailConfiguration.objects.count()
+    if total_count <= 1:
+        messages.warning(
+            request,
+            _("You have only 1 Mail server configuration that can't be deleted"),
+        )
+        return HorillaRedirect(request)
+
+    # Prevent deleting primary
+    if emailconfig.is_primary:
+        mails = DynamicEmailConfiguration.objects.all().exclude(is_primary=True)
+        return render(
+            request,
+            "base/mail_server/replace_mail.html",
+            {
+                "mails": mails,
+                "title": _("Can't Delete"),
+            },
+        )
+
+    emailconfig.delete()
+    messages.success(request, _("Mail server configuration deleted"))
+
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1730,7 +1745,7 @@ def mail_server_create_or_update(request):
         form = DynamicMailConfForm(request.POST, instance=instance)
         if form.is_valid():
             form.save()
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request, "base/mail_server/form.html", {"form": form, "instance": instance}
     )
@@ -1771,7 +1786,7 @@ def view_mail_template(request, obj_id):
         if form.is_valid():
             form.save()
             messages.success(request, "Template updated")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -1796,7 +1811,7 @@ def create_mail_templates(request):
             instance = form.save()
             instance.save()
             messages.success(request, "Template created")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -1831,7 +1846,7 @@ def company_create(request):
             form.save()
 
             messages.success(request, _("Company has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -1871,7 +1886,7 @@ def company_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Company updated"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request, "base/company/company_form.html", {"form": form, "company": company}
     )
@@ -1892,7 +1907,7 @@ def department_create(request):
             form.save()
             form = DepartmentForm()
             messages.success(request, _("Department has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/department/department_form.html",
@@ -1934,7 +1949,7 @@ def department_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Department updated."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/department/department_form.html",
@@ -1980,7 +1995,7 @@ def job_position_creation(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Job Position has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/job_position/job_position_form.html",
@@ -2008,7 +2023,7 @@ def job_position_update(request, id, **kwargs):
         if form.is_valid():
             form.save(commit=True)
             messages.success(request, _("Job position updated."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/job_position/job_position_form.html",
@@ -2037,7 +2052,7 @@ def job_role_create(request):
         ):
             form.save(commit=True)
             messages.success(request, _("Job role has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -2086,7 +2101,7 @@ def job_role_update(request, id, **kwargs):
         if form.is_valid():
             form.save(commit=True)
             messages.success(request, _("Job role updated."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -2115,7 +2130,7 @@ def work_type_create(request):
             form = WorkTypeForm()
 
             messages.success(request, _("Work Type has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -2157,7 +2172,7 @@ def work_type_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Work type updated."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/work_type/work_type_form.html",
@@ -2180,7 +2195,7 @@ def rotating_work_type_create(request):
             form.save()
             form = RotatingWorkTypeForm()
             messages.success(request, _("Rotating work type created."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/rotating_work_type/htmx/rotating_work_type_form.html",
@@ -2220,7 +2235,7 @@ def rotating_work_type_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Rotating work type updated."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -2303,14 +2318,7 @@ def rotating_work_type_assign_add(request):
             )
 
             messages.success(request, _("Rotating work type assigned."))
-            response = render(
-                request,
-                "base/rotating_work_type/htmx/rotating_work_type_assign_form.html",
-                {"form": form},
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "base/rotating_work_type/htmx/rotating_work_type_assign_form.html",
@@ -2431,14 +2439,7 @@ def rotating_work_type_assign_update(request, id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Rotating work type assign updated."))
-            response = render(
-                request,
-                "base/rotating_work_type/htmx/rotating_work_type_assign_update_form.html",
-                {"update_form": form},
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "base/rotating_work_type/htmx/rotating_work_type_assign_update_form.html",
@@ -2514,16 +2515,16 @@ def rotating_work_type_assign_redirect(request, obj_id=None, employee_id=None):
             if rwork_type_requests.exists():
                 return redirect(f"/rotating-list-view?is_active=True&{previous_data}")
             else:
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         else:
             return redirect(
                 f"/employee-rotating-work-tab-list/{employee_id}?deleted=True"
             )
 
     elif hx_target:
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
     else:
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -2560,7 +2561,11 @@ def rotating_work_type_assign_bulk_archive(request):
     """
     This method is used to archive/un-archive bulk rotating work type assigns.
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(
+            request, message=_("No rotatingworktype found matching the query.")
+        )
     ids = json.loads(ids)
     is_active = True
     message = _("un-archived")
@@ -2606,7 +2611,11 @@ def rotating_work_type_assign_bulk_delete(request):
     """
     This method is used to archive/un-archive bulk rotating work type assigns
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(
+            request, message=_("No rotatingworktype found matching the query.")
+        )
     ids = json.loads(ids)
     for id in ids:
         try:
@@ -2682,7 +2691,7 @@ def employee_type_create(request):
             form.save()
             form = EmployeeTypeForm()
             messages.success(request, _("Employee type created."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/employee_type/employee_type_form.html",
@@ -2708,7 +2717,7 @@ def employee_type_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Employee type updated."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/employee_type/employee_type_form.html",
@@ -2752,7 +2761,7 @@ def employee_shift_create(request):
             messages.success(
                 request, _("Employee Shift has been created successfully!")
             )
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/shift/shift_form.html",
@@ -2777,7 +2786,7 @@ def employee_shift_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Shift updated"))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request, "base/shift/shift_form.html", {"form": form, "shift": employee_shift}
     )
@@ -2819,7 +2828,7 @@ def employee_shift_schedule_create(request):
             messages.success(
                 request, _("Employee Shift Schedule has been created successfully!")
             )
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     return render(
         request, "base/shift/schedule_form.html", {"form": form, "shifts": shifts}
@@ -2845,7 +2854,7 @@ def employee_shift_schedule_update(request, id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Shift schedule created."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/shift/schedule_form.html",
@@ -2882,7 +2891,7 @@ def rotating_shift_create(request):
             form.save()
             form = RotatingShiftForm()
             messages.success(request, _("Rotating shift created."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     else:
         form = RotatingShiftForm()
     return render(
@@ -2910,7 +2919,7 @@ def rotating_shift_update(request, id, **kwargs):
             form.save()
             form = RotatingShiftForm()
             messages.success(request, _("Rotating shift updated."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/rotating_shift/htmx/rotating_shift_form.html",
@@ -2999,14 +3008,7 @@ def rotating_shift_assign_add(request):
             )
 
             messages.success(request, _("Rotating shift assigned."))
-            response = render(
-                request,
-                "base/rotating_shift/htmx/rotating_shift_assign_form.html",
-                {"form": form},
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "base/rotating_shift/htmx/rotating_shift_assign_form.html",
@@ -3122,16 +3124,7 @@ def rotating_shift_assign_update(request, id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Rotating shift assign updated."))
-            response = render(
-                request,
-                "base/rotating_shift/htmx/rotating_shift_assign_update_form.html",
-                {
-                    "update_form": form,
-                },
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "base/rotating_shift/htmx/rotating_shift_assign_update_form.html",
@@ -3395,10 +3388,8 @@ def rotating_shift_assign_redirect(request, obj_id, employee_id):
         return redirect(
             f"/rotating-shift-individual-tab-view/{employee_id}?deleted=true"
         )
-    elif hx_target:
-        return HttpResponse("<script>window.location.reload()</script>")
-    else:
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -3433,7 +3424,11 @@ def rotating_shift_assign_bulk_archive(request):
     """
     This method is used to archive/un-archive bulk rotating shift assigns
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(
+            request, message=_("No rotatingshift found matching the query.")
+        )
     ids = json.loads(ids)
     is_active = True
     message = _("un-archived")
@@ -3478,7 +3473,11 @@ def rotating_shift_assign_bulk_delete(request):
     """
     This method is used to bulk delete for rotating shift assign
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(
+            request, message=_("No rotatingshift found matching the query.")
+        )
     ids = json.loads(ids)
     for id in ids:
         try:
@@ -3588,6 +3587,7 @@ def employee_permission_assign(request, pk=None):
 
 
 @login_required
+@hx_request_required
 @permission_required("view_permissions")
 def employee_permission_search(request, codename=None, uid=None):
     """
@@ -3637,19 +3637,50 @@ def update_permission(
     """
     This method is used to remove user permission.
     """
-    form = AssignPermission(request.POST)
-    if form.is_valid():
-        form.save()
-        return JsonResponse({"message": "Updated the permissions", "type": "success"})
-    if (
-        form.data.get("employee")
-        and Employee.objects.filter(id=form.data["employee"]).first()
-    ):
-        Employee.objects.filter(
-            id=form.data["employee"]
-        ).first().employee_user_id.user_permissions.clear()
-        return JsonResponse({"message": "All permission cleared", "type": "info"})
-    return JsonResponse({"message": "Something went wrong", "type": "danger"})
+    try:
+        data = json.loads(request.body)
+
+        employee_id = data.get("employee")
+        permissions_data = data.get("permissions", [])
+
+        if not employee_id:
+            messages.error(request, _("Employee not provided"))
+            return JsonResponse(
+                {"message": "Employee not provided", "type": "danger"}, status=400
+            )
+
+        employee = Employee.objects.select_related("employee_user_id").get(
+            id=employee_id
+        )
+        user = employee.employee_user_id
+
+        all_codenames = [p["codename"] for p in permissions_data]
+        checked_codenames = [p["codename"] for p in permissions_data if p["checked"]]
+
+        existing_managed = user.user_permissions.filter(codename__in=all_codenames)
+        managed_permissions = Permission.objects.filter(codename__in=all_codenames)
+        checked_permissions = managed_permissions.filter(codename__in=checked_codenames)
+
+        user.user_permissions.remove(*existing_managed)
+        user.user_permissions.add(*checked_permissions)
+
+        messages.success(request, _("Permissions updated successfully"))
+
+        return JsonResponse(
+            {"message": "Permissions updated successfully", "type": "success"}
+        )
+
+    except Employee.DoesNotExist:
+        messages.error(request, _("Employee not found"))
+        return JsonResponse(
+            {"message": "Employee not found", "type": "danger"}, status=404
+        )
+
+    except Exception as e:
+        messages.error(request, _("Something went wrong"))
+        return JsonResponse(
+            {"message": "Something went wrong", "type": "danger"}, status=500
+        )
 
 
 @login_required
@@ -3683,7 +3714,7 @@ def permission_table(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Employee permission assigned."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/auth/permission_assign.html",
@@ -3910,7 +3941,7 @@ def work_type_request(request):
             messages.success(request, _("Work type request added."))
             work_type_requests = WorkTypeRequest.objects.all()
             if len(work_type_requests) == 1:
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
             form = WorkTypeRequestForm()
     context["form"] = form
     return render(request, "work_type_request/request_form.html", context=context)
@@ -3919,7 +3950,7 @@ def work_type_request(request):
 def handle_wtr_redirect(request, work_type_request):
     hx_request = request.META.get("HTTP_HX_REQUEST") == "true"
     if not hx_request:
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     current_url = "/" + "/".join(
         request.META.get("HTTP_HX_CURRENT_URL", "").split("/")[3:]
@@ -3927,7 +3958,7 @@ def handle_wtr_redirect(request, work_type_request):
     hx_target = request.META.get("HTTP_HX_TARGET")
 
     if not current_url:
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
     if hx_target == "objectDetailsModalTarget":
         instances_ids = request.GET.get("instances_ids")
@@ -3947,7 +3978,7 @@ def handle_wtr_redirect(request, work_type_request):
     if "/employee-view/" in current_url:
         return redirect(f"/employee/shift-tab/{work_type_request.employee_id.id}")
 
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -3961,7 +3992,7 @@ def work_type_request_cancel(request, id):
     work_type_request = WorkTypeRequest.find(id)
     if not work_type_request:
         messages.error(request, _("Work type request not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     if not (
         is_reportingmanger(request, work_type_request)
@@ -3970,7 +4001,7 @@ def work_type_request_cancel(request, id):
         and work_type_request.approved == False
     ):
         messages.error(request, _("You don't have permission"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     work_type_request.canceled = True
     work_type_request.approved = False
     work_info = EmployeeWorkInformation.objects.filter(
@@ -4003,7 +4034,11 @@ def work_type_request_bulk_cancel(request):
     """
     This method is used to cancel a bunch work type request
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(
+            request, message=_("No worktype request found matching the query.")
+        )
     ids = json.loads(ids)
     result = False
     for id in ids:
@@ -4047,7 +4082,7 @@ def work_type_request_approve(request, id):
     work_type_request = WorkTypeRequest.find(id)
     if not work_type_request:
         messages.error(request, _("Work type request not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     if not (
         is_reportingmanger(request, work_type_request)
         or request.user.has_perm("approve_worktyperequest")
@@ -4055,7 +4090,7 @@ def work_type_request_approve(request, id):
         and not work_type_request.approved
     ):
         messages.error(request, _("You don't have permission"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     """
     Here the request will be approved, can send mail right here
     """
@@ -4088,7 +4123,11 @@ def work_type_request_bulk_approve(request):
     """
     This method is used to approve bulk of requested work type
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(
+            request, message=_("No worktype request found matching the query.")
+        )
     ids = json.loads(ids)
     result = False
     for id in ids:
@@ -4140,22 +4179,13 @@ def work_type_request_update(request, work_type_request_id):
     form = choosesubordinates(request, form, "base.change_worktyperequest")
     form = include_employee_instance(request, form)
     if request.method == "POST":
-        response = render(
-            request,
-            "work_type_request/request_form.html",
-            {
-                "form": form,
-            },
-        )
         form = WorkTypeRequestForm(request.POST, instance=work_type_request)
         form = choosesubordinates(request, form, "base.change_worktyperequest")
         form = include_employee_instance(request, form)
         if form.is_valid():
             form.save()
             messages.success(request, _("Request Updated Successfully"))
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
 
     return render(request, "work_type_request/request_form.html", {"form": form})
 
@@ -4224,7 +4254,7 @@ def work_type_request_delete(request, obj_id):
             if work_type_requests.exists():
                 return redirect(f"/work-list-view?{previous_data}")
             else:
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         else:
             return redirect(f"/employeeprofileview-Work Type & Shift/{employee.id}")
 
@@ -4232,10 +4262,11 @@ def work_type_request_delete(request, obj_id):
         return redirect(f"/employee/shift-tab/{employee.id}")
 
     else:
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
 
 @login_required
+@hx_request_required
 def work_type_request_single_view(request, obj_id):
     """
     This method is used to view details of an work type request
@@ -4332,11 +4363,7 @@ def shift_request(request):
         form = ShiftRequestForm(request.POST)
         form = choosesubordinates(request, form, "base.add_shiftrequest")
         form = include_employee_instance(request, form)
-        response = render(
-            request,
-            "shift_request/htmx/shift_request_create_form.html",
-            {"form": form, "f": f},
-        )
+
         if form.is_valid():
             instance = form.save()
             try:
@@ -4360,9 +4387,7 @@ def shift_request(request):
             except Exception as e:
                 pass
             messages.success(request, _("Shift request added"))
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "shift_request/htmx/shift_request_create_form.html",
@@ -4374,6 +4399,8 @@ def shift_request(request):
 def update_employee_allocation(request):
 
     shift = request.GET.get("shift_id")
+    if not shift:
+        return HorillaRedirect(request, message=_("No shift found matching the query."))
     form = ShiftAllocationForm()
     shift = EmployeeShift.objects.filter(id=shift).first()
     employee_ids = shift.employeeworkinformation_set.values_list(
@@ -4409,11 +4436,7 @@ def shift_request_allocation(request):
         form = ShiftAllocationForm(request.POST)
         form = choosesubordinates(request, form, "base.add_shiftrequest")
         form = include_employee_instance(request, form)
-        response = render(
-            request,
-            "shift_request/htmx/shift_allocation_form.html",
-            {"form": form, "f": f},
-        )
+
         if form.is_valid():
             instance = form.save()
             reallocate_emp = form.cleaned_data["reallocate_to"]
@@ -4450,9 +4473,7 @@ def shift_request_allocation(request):
                 pass
 
             messages.success(request, _("Request Added"))
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "shift_request/htmx/shift_allocation_form.html",
@@ -4556,6 +4577,7 @@ def shift_request_export(request):
 
 
 @login_required
+@hx_request_required
 def shift_request_search(request):
     """
     This method is used search shift request by employee and also used to filter shift request.
@@ -4673,6 +4695,9 @@ def shift_request_details(request, id):
         id : shift request instance id
     """
     shift_request = ShiftRequest.find(id)
+    if not shift_request:
+        messages.error(request, _("Shift request not found."))
+        return HorillaRedirect(request)
     requests_ids_json = request.GET.get("instances_ids")
     context = {
         "shift_request": shift_request,
@@ -4700,6 +4725,9 @@ def shift_allocation_request_details(request, id):
         id : shift request instance id
     """
     shift_request = ShiftRequest.find(id)
+    if not shift_request:
+        messages.error(request, _("Shift request not found."))
+        return HorillaRedirect(request)
     requests_ids_json = request.GET.get("instances_ids")
     context = {
         "shift_request": shift_request,
@@ -4733,26 +4761,17 @@ def shift_request_update(request, shift_request_id):
     form = include_employee_instance(request, form)
     if request.method == "POST":
         if not shift_request.approved:
-            response = render(
-                request,
-                "shift_request/request_update_form.html",
-                {
-                    "form": form,
-                },
-            )
+
             form = ShiftRequestForm(request.POST, instance=shift_request)
             form = choosesubordinates(request, form, "base.change_shiftrequest")
             form = include_employee_instance(request, form)
             if form.is_valid():
                 form.save()
                 messages.success(request, _("Request Updated Successfully"))
-                return HttpResponse(
-                    response.content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
         else:
             messages.info(request, _("Can't edit approved shift request"))
-            return HttpResponse("<script>location.reload();</script>")
+            return HorillaRedirect(request)
 
     return render(request, "shift_request/request_update_form.html", {"form": form})
 
@@ -4836,7 +4855,7 @@ def shift_request_cancel(request, id):
     shift_request = ShiftRequest.find(id)
     if not shift_request:
         messages.error(request, _("Shift request not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     if not (
         is_reportingmanger(request, shift_request)
         or request.user.has_perm("base.cancel_shiftrequest")
@@ -4844,7 +4863,7 @@ def shift_request_cancel(request, id):
         and shift_request.approved == False
     ):
         messages.error(request, _("You don't have permission"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     today_date = datetime.today().date()
     if (
         shift_request.approved
@@ -4894,7 +4913,7 @@ def shift_request_cancel(request, id):
             redirect=reverse("shift-request-view") + f"?id={shift_request.id}",
             icon="close",
         )
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -4907,6 +4926,10 @@ def shift_allocation_request_cancel(request, id):
     """
 
     shift_request = ShiftRequest.find(id)
+    if not shift_request:
+        return HorillaRedirect(
+            request, message=_("No shift request found matching the query.")
+        )
 
     shift_request.reallocate_canceled = True
     shift_request.reallocate_approved = False
@@ -4932,7 +4955,7 @@ def shift_allocation_request_cancel(request, id):
         icon="close",
     )
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -5007,7 +5030,7 @@ def shift_request_approve(request, id):
     shift_request = ShiftRequest.find(id)
     if not shift_request:
         messages.error(request, _("Shift request not found."))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     user = request.user
     if not (
@@ -5017,14 +5040,14 @@ def shift_request_approve(request, id):
         and not shift_request.approved
     ):
         messages.error(request, _("You don't have permission"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     if shift_request.is_any_request_exists():
         messages.error(
             request,
             _("An approved shift request already exists during this time period."),
         )
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     today_date = datetime.today().date()
     if not shift_request.is_permanent_shift:
@@ -5062,7 +5085,7 @@ def shift_request_approve(request, id):
             icon="checkmark",
         )
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -5074,6 +5097,10 @@ def shift_allocation_request_approve(request, id):
     """
 
     shift_request = ShiftRequest.find(id)
+    if not shift_request:
+        return HorillaRedirect(
+            request, message=_("No shift request found matching the query.")
+        )
 
     if not shift_request.is_any_request_exists():
         shift_request.reallocate_approved = True
@@ -5091,13 +5118,13 @@ def shift_allocation_request_approve(request, id):
             redirect=reverse("shift-request-view") + f"?id={shift_request.id}",
             icon="checkmark",
         )
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     else:
         messages.error(
             request,
             _("An approved shift request already exists during this time period."),
         )
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -5206,10 +5233,8 @@ def shift_request_delete(request, id):
             return redirect(
                 f"/shift-detail-view/{next_instance}/?{previous_data}&instance_ids={instances_list}&deleted=true"
             )
-        else:
-            return HttpResponse(status=204, headers={"HX-Refresh": "true"})
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -5311,20 +5336,32 @@ def delete_notification(request, id):
     """
     This method is used to delete notification
     """
-    script = ""
     try:
         request.user.notifications.get(id=id).delete()
         messages.success(request, _("Notification deleted."))
+    except request.user.notifications.model.DoesNotExist:
+        messages.error(request, _("Notification not found."))
+        return HorillaRedirect(request)
     except Exception as e:
         messages.error(request, e)
-    if not request.user.notifications.all():
-        script = """<span hx-get='/all-notifications' hx-target='#allNotificationBody' hx-trigger='load'></span>"""
-    return HttpResponse(script)
+    return HttpResponse(
+        "<script>"
+        "setTimeout(function(){"
+        "$('#reloadMessagesButton').click();"
+        "htmx.ajax('GET','/all-notifications/',{target:'#sidebarModalBody',swap:'innerHTML'});"
+        "},100);"
+        "</script>"
+    )
 
 
 @login_required
 def mark_as_read_notification(request, notification_id):
     script = ""
+    notification_id = request.GET.get("notification_id")
+    if not notification_id:
+        return HorillaRedirect(
+            request, message=_("No notification found matching the query.")
+        )
     notification = Notification.objects.get(id=notification_id)
     notification.mark_as_read()
     if not request.user.notifications.unread():
@@ -5449,7 +5486,7 @@ def general_settings(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Settings updated."))
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -5487,6 +5524,11 @@ def save_date_format(request):
         # Taking the selected Date Format
         selected_format = request.POST.get("selected_format")
 
+        if selected_format not in settings.HORILLA_DATE_FORMATS:
+            messages.error(request, _("Invalid date format."))
+            return JsonResponse(
+                {"success": False, "error": "Invalid date format."}, status=400
+            )
         if not len(selected_format):
             messages.error(request, _("Please select a valid date format."))
         else:
@@ -5977,7 +6019,7 @@ def tag_create(request):
             form.save()
             form = TagsForm()
             messages.success(request, _("Tag has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/tags/tags_form.html",
@@ -6002,7 +6044,7 @@ def tag_update(request, tag_id):
             form.save()
             form = TagsForm()
             messages.success(request, _("Tag has been updated successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/tags/tags_form.html",
@@ -6024,7 +6066,7 @@ def audit_tag_create(request):
             form.save()
             form = AuditTagForm()
             messages.success(request, _("Tag has been created successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/audit_tag/audit_tag_form.html",
@@ -6049,7 +6091,7 @@ def audit_tag_update(request, tag_id):
             form.save()
             form = AuditTagForm()
             messages.success(request, _("Tag has been updated successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/audit_tag/audit_tag_form.html",
@@ -6116,15 +6158,15 @@ def get_condition_value_fields(request):
 @hx_request_required
 @permission_required("base.add_multipleapprovalcondition")
 def add_more_approval_managers(request):
-    currnet_hx_target = request.META.get("HTTP_HX_TARGET")
-    hx_target_split = currnet_hx_target.split("_")
+    current_hx_target = request.META.get("HTTP_HX_TARGET")
+    hx_target_split = current_hx_target.split("_")
     next_hx_target = "_".join([hx_target_split[0], str(int(hx_target_split[-1]) + 1)])
 
     form = MultipleApproveConditionForm()
     managers_count = request.GET.get("managers_count")
     context = {
         "next_hx_target": next_hx_target,
-        "currnet_hx_target": currnet_hx_target,
+        "current_hx_target": current_hx_target,
     }
     if managers_count:
         managers_count = int(managers_count) + 1
@@ -6326,6 +6368,12 @@ def multiple_level_approval_delete(request, condition_id):
     request_copy.pop("instances_ids", None)
     previous_data = request_copy.urlencode()
 
+    if not MultipleApprovalCondition.objects.filter(id=condition_id).exists():
+        return HorillaRedirect(
+            request,
+            message=_("No MultipleApprovalCondition matching query does not exist."),
+        )
+
     condition = MultipleApprovalCondition.objects.get(id=condition_id)
     condition.delete()
     messages.success(request, _("Multiple approval condition deleted successfully"))
@@ -6500,11 +6548,20 @@ def delete_shift_comment_file(request):
     """
     Used to delete attachment
     """
-    ids = request.GET.getlist("ids")
-    shift_id = request.GET["shift_id"]
-    comment_id = request.GET["comment_id"]
+
+    try:
+        ids = [int(i) for i in request.GET.getlist("ids") if i.isdigit()]
+        shift_id = int(request.GET["shift_id"])
+        comment_id = int(request.GET["comment_id"])
+    except (KeyError, ValueError):
+        return HorillaRedirect(
+            request,
+            message=_("Invalid Request"),
+        )
+
     comment = ShiftRequestComment.find(comment_id)
     script = ""
+
     if (
         request.user.employee_get == comment.employee_id
         or request.user.has_perm("base.delete_baserequestfile")
@@ -6514,7 +6571,14 @@ def delete_shift_comment_file(request):
         messages.success(request, _("File deleted successfully"))
     else:
         messages.warning(request, _("You don't have permission"))
-        script = f"""<span hx-get="/view-shift-comment/{shift_id}/" hx-trigger="load" hx-target="#commentContainer" data-target="#activitySidebar"></span>"""
+        script = f"""
+        <span hx-get="/view-shift-comment/{shift_id}/"
+            hx-trigger="load"
+            hx-target="#commentContainer"
+            data-target="#activitySidebar">
+        </span>
+        """
+
     return HttpResponse(script)
 
 
@@ -6560,11 +6624,19 @@ def delete_work_type_comment_file(request):
     """
     Used to delete attachment
     """
-    ids = request.GET.getlist("ids")
-    request_id = request.GET["request_id"]
-    comment_id = request.GET["comment_id"]
+
+    try:
+        ids = [int(i) for i in request.GET.getlist("ids") if i.isdigit()]
+        request_id = int(request.GET["request_id"])
+        comment_id = int(request.GET["comment_id"])
+    except (KeyError, ValueError):
+        return HorillaRedirect(
+            request, message=_("Invalid Request"), redirect_to="work-type-request-view"
+        )
+
     comment = WorkTypeRequestComment.find(comment_id)
     script = ""
+
     if (
         request.user.employee_get == comment.employee_id
         or request.user.has_perm("base.delete_baserequestfile")
@@ -6574,7 +6646,14 @@ def delete_work_type_comment_file(request):
         messages.success(request, _("File deleted successfully"))
     else:
         messages.warning(request, _("You don't have permission"))
-        script = f"""<span hx-get="/view-work-type-comment/{request_id}/" hx-trigger="load" hx-target="#commentContainer" data-target="#activitySidebar"></span>"""
+        script = f"""
+        <span hx-get="/view-work-type-comment/{request_id}/"
+            hx-trigger="load"
+            hx-target="#commentContainer"
+            data-target="#activitySidebar">
+        </span>
+        """
+
     return HttpResponse(script)
 
 
@@ -6761,7 +6840,7 @@ def pagination_settings_view(request):
                 messages.success(request, _("Default pagination updated."))
     if request.META.get("HTTP_HX_REQUEST"):
         return HttpResponse()
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -6857,7 +6936,7 @@ def action_type_delete(request, act_id):
                 "This action type is in use in disciplinary actions and cannot be deleted."
             ),
         )
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
     else:
         Actiontype.objects.filter(id=act_id).delete()
@@ -6877,6 +6956,7 @@ def driver_viewed_status(request):
 
 
 @login_required
+@hx_request_required
 def dashboard_components_toggle(request):
     """
     This function is used to create personalized dashboard charts for employees
@@ -6894,6 +6974,7 @@ def dashboard_components_toggle(request):
 
 
 @login_required
+@hx_request_required
 def employee_chart_show(request):
     """
     This function is used to choose which chart to show in the dashboard
@@ -6925,6 +7006,7 @@ def employee_chart_show(request):
 
 
 @login_required
+@hx_request_required
 def reorder_dashboard_charts(request):
     """
     This function is used to reorder the dashboard charts
@@ -7007,7 +7089,7 @@ def generate_error_report(error_list, error_data, file_name):
         del error_data[key]
 
     data_frame = pd.DataFrame(error_data, columns=error_data.keys())
-    styled_data_frame = data_frame.style.applymap(
+    styled_data_frame = data_frame.style.map(
         lambda x: "text-align: center", subset=pd.IndexSlice[:, :]
     )
 
@@ -7076,7 +7158,7 @@ def holiday_creation(request):
             form = HolidayForm()
             messages.success(request, _("New holiday created successfully.."))
             if Holidays.objects.filter().count() == 1:
-                return HttpResponse("<script>window.location.reload();</script>")
+                return HorillaRedirect(request)
     return render(
         request, "holiday/holiday_form.html", {"form": form, "pd": previous_data}
     )
@@ -7251,6 +7333,7 @@ def excel_holiday_import(file):
 
 
 @login_required
+@hx_request_required
 @permission_required("base.add_holiday")
 def holidays_info_import(request):
     result = None
@@ -7288,7 +7371,7 @@ def holidays_info_import(request):
                 messages.error(
                     request, _("The file you attempted to import is unsupported")
                 )
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
             created_holidays_count = total_count - len(error_list)
             context = {
@@ -7436,7 +7519,7 @@ def holiday_delete(request, obj_id):
     except ProtectedError:
         messages.error(request, _("Related entries exists"))
     if not Holidays.objects.filter():
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
     return redirect(f"/holiday-filter?{query_string}")
 
 
@@ -7513,7 +7596,7 @@ def company_leave_creation(request):
             form.save()
             messages.success(request, _("New company leave created successfully.."))
             if CompanyLeaves.objects.filter().count() == 1:
-                return HttpResponse("<script>window.location.reload();</script>")
+                return HorillaRedirect(request)
     return render(
         request, "company_leave/company_leave_creation_form.html", {"form": form}
     )
@@ -7633,7 +7716,7 @@ def company_leave_delete(request, id):
     except ProtectedError:
         messages.error(request, _("Related entries exists"))
     if not CompanyLeaves.objects.filter():
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
     return redirect(f"/company-leave-filter?{query_string}")
 
 
@@ -7650,7 +7733,11 @@ def view_penalties(request):
 @login_required
 @permission_required("base.delete_penaltyaccounts")
 def delete_penalities(request, penalty_id):
-    penalty = PenaltyAccounts.objects.get(id=penalty_id)
+    penalty = PenaltyAccounts.objects.filter(id=penalty_id).first()
+    if not penalty:
+        return HorillaRedirect(
+            request, message=_("No penalty account found matching the query.")
+        )
     penalty.delete()
     messages.success(request, _("Penalty deleted suucessfully"))
     return HttpResponse(
@@ -7708,32 +7795,34 @@ def is_jwt_token_valid(auth_header):
 
 def protected_media(request, path):
     public_pages = [
-        "/login/",
-        "/forgot-password/",
-        "/change-username/",
-        "/change-password/",
-        "/employee-reset-password/",
-        "/recruitment/candidate-survey/",
-        "/recruitment/open-recruitments/",
-        "/recruitment/candidate-self-status-tracking/",
+        "/login",
+        "/forgot-password",
+        "/change-username",
+        "/change-password",
+        "/employee-reset-password",
+        "/recruitment/candidate-survey",
+        "/recruitment/open-recruitments",
+        "/recruitment/candidate-self-status-tracking",
     ]
 
-    # EXACT folder where company logos exist
-    exempted_folders = [
-        "base/company/icon/",
-    ]
+    exempted_folders = ["base/icon/"]
 
-    media_path = os.path.join(settings.MEDIA_ROOT, path)
+    # Prevent path traversal
+    try:
+        media_path = safe_join(settings.MEDIA_ROOT, path)
+    except Exception:
+        # safe_join raises ValueError if traversal detected
+        raise Http404("Invalid file path")
 
-    if not os.path.exists(media_path):
+    if not os.path.exists(media_path) or not os.path.isfile(media_path):
         raise Http404("File not found")
 
     referer_path = urlparse(request.META.get("HTTP_REFERER", "")).path
 
-    # JWT support (your existing logic)
+    # Try Bearer token auth
     jwt_user = is_jwt_token_valid(request.META.get("HTTP_AUTHORIZATION", ""))
 
-    # Access control
+    # Access control logic
     if referer_path not in public_pages and not any(
         path.startswith(folder) for folder in exempted_folders
     ):
@@ -7744,5 +7833,4 @@ def protected_media(request, path):
             )
             return redirect("login")
 
-    # Allow logo to be served publicly
     return FileResponse(open(media_path, "rb"))

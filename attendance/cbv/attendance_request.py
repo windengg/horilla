@@ -81,7 +81,7 @@ class AttendancesRequestListView(HorillaListView):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.search_url = reverse("attendance-request-tab")
+        self.search_url = reverse("attendance-list-tab")
 
     filter_class = AttendanceFilters
     model = Attendance
@@ -163,7 +163,7 @@ class AttendanceRequestListTab(AttendancesRequestListView):
     columns = [
         col for col in AttendancesRequestListView.columns if col[1] != "status_col"
     ]
-
+    option_method = "request_options"
     action_method = "request_actions"
     row_attrs = """
                 id = "requestedattendanceTr{get_instance_id}"

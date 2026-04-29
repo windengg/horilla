@@ -18,7 +18,7 @@ import operator
 import os
 import threading
 from datetime import date, datetime, timedelta
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pandas as pd
@@ -31,11 +31,12 @@ from django.db import models
 from django.db.models import F, ProtectedError, Q
 from django.db.models.query import QuerySet
 from django.forms import DateInput, HiddenInput, Select
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import format_html
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_http_methods
@@ -117,6 +118,7 @@ from horilla.decorators import (
 )
 from horilla.filters import HorillaPaginator
 from horilla.group_by import group_by_queryset
+from horilla.http.response import HorillaRedirect
 from horilla.methods import dynamic_attr, get_horilla_model_class
 from horilla_audit.models import AccountBlockUnblock, HistoryTrackingFields
 from horilla_auth.models import HorillaUser
@@ -297,7 +299,7 @@ def profile_edit_access(request, emp_id):
                 cache.delete(user_cache_key[-1])
                 update_employee_accessibility_cache(user_cache_key[-1], employee)
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -652,7 +654,7 @@ def document_request_create(request):
                 redirect=reverse("employee-profile"),
                 icon="chatbox-ellipses",
             )
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -685,7 +687,7 @@ def document_request_update(request, id):
                 Employee.objects.filter(id__in=form.data.getlist("employee_id"))
             )
             documents.exclude(employee_id__in=doc_obj.employee_id.all()).delete()
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -742,7 +744,7 @@ def document_create(request, emp_id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Document created successfully."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -751,6 +753,7 @@ def document_create(request, emp_id):
     return render(request, "tabs/htmx/document_create_form.html", context=context)
 
 
+@hx_request_required
 def get_notify_field(request):
     expiry_date = request.GET.get("expiry_date")
     form = DocumentForm()
@@ -802,41 +805,68 @@ def document_delete(request, id):
     cannot be deleted, it handles the exception and informs the user.
     """
     try:
-        document = Document.objects.filter(id=id)
+        document_qs = Document.objects.filter(id=id)
+
         if not request.user.has_perm("horilla_documents.delete_document"):
-            document = document.filter(
+            document_qs = document_qs.filter(
                 employee_id__employee_user_id=request.user
             ).exclude(document_request_id__isnull=False)
+
+        document = document_qs.first()
+
         if document:
-            document_first = document.first()
+            document_first = document
             document.delete()
+
             messages.success(
                 request,
-                _(
-                    f"Document request {document_first} for {document_first.employee_id} deleted successfully"
-                ),
+                _("Document request %(doc)s for %(employee)s deleted successfully")
+                % {
+                    "doc": document_first,
+                    "employee": document_first.employee_id,
+                },
             )
             referrer = request.META.get("HTTP_REFERER", "")
-            referrer = "/" + "/".join(referrer.split("/")[3:])
-            if referrer.startswith("/employee/employee-view/") or referrer.endswith(
+            path = urlparse(referrer).path or ""
+
+            if path.startswith("/employee/employee-view/") or path.endswith(
                 "/employee/employee-profile/"
             ):
                 existing_documents = Document.objects.filter(
                     employee_id=document_first.employee_id
                 )
                 if not existing_documents:
-                    return HttpResponse(
-                        f"""
-                            <span hx-get='/employee/document-tab/{document_first.employee_id.id}?employee_view=true'
-                            hx-target='#document_target' hx-trigger='load'></span>
-                        """
+                    url = reverse(
+                        "employee-document-tab",
+                        kwargs={"employee_id": document_first.employee_id.id},
                     )
+
+                    html = format_html(
+                        "<span hx-get='{}?employee_view=true' "
+                        "hx-target='#document_target' "
+                        "hx-trigger='load'></span>",
+                        url,
+                    )
+                    return HttpResponse(html)
+
             return HttpResponse("<script>$('#reloadMessagesButton').click();</script>")
         else:
             messages.error(request, _("Document not found"))
     except ProtectedError:
         messages.error(request, _("You cannot delete this document."))
-    return HttpResponse(status=204, headers={"HX-Refresh": "true"})
+    return HorillaRedirect(request)
+
+
+def can_access_document(request, document, perm):
+    """
+    Check if the current user is authorized to access the given document.
+    """
+    employee = request.user.employee_get
+    return (
+        document.employee_id == employee
+        or document.employee_id.get_reporting_manager() == employee
+        or request.user.has_perm(perm)
+    )
 
 
 @login_required
@@ -852,7 +882,19 @@ def file_upload(request, id):
     Returns: return document_form template
     """
 
-    document_item = Document.objects.get(id=id)
+    document_item = Document.find(id)
+    if document_item is None:
+        return HorillaRedirect(
+            request, message=_("No Document found matching the query.")
+        )
+
+    if not can_access_document(
+        request, document_item, "horilla_documents.change_document"
+    ):
+        return HorillaRedirect(
+            request, message=_("You do not have permission to update this document.")
+        )
+
     form = DocumentUpdateForm(instance=document_item)
     if request.method == "POST":
         form = DocumentUpdateForm(request.POST, request.FILES, instance=document_item)
@@ -876,7 +918,7 @@ def file_upload(request, id):
                 )
             except:
                 pass
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {"form": form, "document": document_item}
     return render(request, "tabs/htmx/document_form.html", context=context)
@@ -918,6 +960,18 @@ def view_file(request, id):
     """
 
     document_obj = Document.objects.filter(id=id).first()
+    if document_obj is None:
+        return HorillaRedirect(
+            request, message=_("No Document found matching the query.")
+        )
+
+    if not can_access_document(
+        request, document_obj, "horilla_documents.view_document"
+    ):
+        return HorillaRedirect(
+            request, message=_("You do not have permission to view this document.")
+        )
+
     context = {
         "document": document_obj,
     }
@@ -982,7 +1036,7 @@ def document_approve(request, id):
         """
         return HttpResponse(span)
 
-    return HttpResponse(status=204, headers={"HX-Refresh": "true"})
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1009,10 +1063,10 @@ def document_reject(request, id):
                 document_obj.save()
                 messages.error(request, _("Document request rejected"))
 
-                return HttpResponse("<script>window.location.reload();</script>")
+                return HorillaRedirect(request)
     else:
         messages.error(request, _("No document uploaded"))
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
 
     return render(
         request,
@@ -1053,10 +1107,11 @@ def document_bulk_approve(request):
                 request, _(f"{not_uploaded_count} document(s) skipped (not uploaded)")
             )
 
-    return HttpResponse(status=204, headers={"HX-Refresh": "true"})
+    return HorillaRedirect(request)
 
 
 @login_required
+@hx_request_required
 @manager_can_enter("horilla_documents.add_document")
 def document_bulk_reject(request):
     """
@@ -1083,7 +1138,7 @@ def document_bulk_reject(request):
         messages.success(
             request, _("{} Document request rejected").format(updated_count)
         )
-        return HttpResponse(status=204, headers={"HX-Refresh": "true"})
+        return HorillaRedirect(request)
 
     return render(
         request, "documents/document_reject_reason.html", {"ids": ids, "form": form}
@@ -1104,7 +1159,7 @@ def employee_profile_bank_details(request):
         bank_info.employee_id = employee
         bank_info.save()
         messages.success(request, _("Bank details updated"))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1192,6 +1247,7 @@ def employee_view(request):
 
 
 @login_required
+@require_http_methods(["POST"])
 @permission_required("employee.change_employee")
 def view_employee_bulk_update(request):
     if request.method == "POST":
@@ -1528,13 +1584,18 @@ def employee_view_update(request, obj_id, **kwargs):
     """
     This method is used to render update form for employee.
     """
+    employee = Employee.objects.filter(id=obj_id).first()
+    if not employee:
+        return HorillaRedirect(
+            request, message=_("No Employee found matching the query.")
+        )
+
     selected_company_id = request.session["selected_company"]
     user = Employee.objects.filter(employee_user_id=request.user).first()
     work_info_history = HistoryTrackingFields.objects.filter(
         work_info_track=True
     ).exists()
 
-    employee = Employee.objects.filter(id=obj_id).first()
     emp = Employee.objects.entire().filter(id=obj_id).first()
     if not employee and emp and hasattr(emp, "employee_work_info"):
         if (
@@ -1610,11 +1671,11 @@ def employee_view_update(request, obj_id, **kwargs):
                         icon="briefcase",
                     )
                     messages.success(request, _("Employee work information updated."))
-                work_form = EmployeeWorkInformationForm(
-                    instance=EmployeeWorkInformation.objects.filter(
-                        employee_id=employee
-                    ).first()
-                )
+                # work_form = EmployeeWorkInformationForm(
+                #     instance=EmployeeWorkInformation.objects.filter(
+                #         employee_id=employee
+                #     ).first()
+                # )
             elif request.POST.get("form") == "bank":
                 instance = EmployeeBankDetails.objects.filter(
                     employee_id=employee
@@ -1638,9 +1699,7 @@ def employee_view_update(request, obj_id, **kwargs):
                 "work_info_history": work_info_history,
             },
         )
-    return HttpResponseRedirect(
-        request.META.get("HTTP_REFERER", "/employee/employee-view")
-    )
+    return HorillaRedirect(request, fallback_url="/employee/employee-view")
 
 
 @login_required
@@ -2082,7 +2141,7 @@ def employee_delete(request, obj_id):
         error_message = str(error_message)
         request.session["error_message"] = error_message
         return redirect(reverse("employee-view") + "?error_message=true")
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", f"/view={view}"))
+    return HorillaRedirect(request, fallback_url=f"/view={view}")
 
 
 @login_required
@@ -2198,7 +2257,7 @@ def employee_archive(request, obj_id):
         messages.success(request, message)
         key = "HTTP_HX_REQUEST"
         if key not in request.META.keys():
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(request)
         else:
             return HttpResponse("<script>$('#applyFilter').click();</script>")
     else:
@@ -2218,8 +2277,13 @@ def employee_archive(request, obj_id):
 @login_required
 @permission_required("employee.change_employee")
 def replace_employee(request, emp_id):
-    title = request.GET.get("title")
     employee = Employee.objects.filter(id=emp_id).first()
+    if not employee:
+        return HorillaRedirect(
+            request, message=_("No Employee found matching the query.")
+        )
+
+    title = request.GET.get("title")
     related_models = (
         employee.get_archive_condition().get("related_models", "") if employee else None
     )
@@ -2317,6 +2381,11 @@ def get_manager_in(request):
     """
     employee_id = request.GET.get("employee_id")
     employee = Employee.objects.filter(id=employee_id).first()
+    if not employee:
+        return HorillaRedirect(
+            request, message=_("No Employee found matching the query.")
+        )
+
     offboarding = request.GET.get("offboarding")
     if offboarding:
         title = _("Change the Designations")
@@ -2335,11 +2404,7 @@ def get_manager_in(request):
     if save:
         employee.save()
         messages.success(request, message)
-        key = "HTTP_HX_REQUEST"
-        if key not in request.META.keys():
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
-        else:
-            return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
     else:
         return render(
             request,
@@ -2355,6 +2420,7 @@ def get_manager_in(request):
 
 
 @login_required
+@hx_request_required
 @enter_if_accessible(
     feature="employee_view",
     perm="employee.view_employee",
@@ -2364,8 +2430,8 @@ def employee_search(request):
     """
     This method is used to search employee
     """
-    search = request.GET["search"]
-    view = request.GET["view"]
+    search = request.GET.get("search")
+    view = request.GET.get("view")
     previous_data = request.GET.urlencode()
     employees = EmployeeFilter(request.GET).qs
     if search == "":
@@ -2805,8 +2871,7 @@ def work_info_export(request):
     selected_fields = request.GET.getlist("selected_fields")
     if not selected_fields:
         selected_fields = form.fields["selected_fields"].initial
-        ids = request.GET.get("ids")
-        id_list = json.loads(ids)
+        id_list = json.loads(request.GET.get("ids", "[]"))
         employees = Employee.objects.filter(id__in=id_list)
 
     prefetch_fields = list(set(f.split("__")[0] for f in selected_fields if "__" in f))
@@ -2890,6 +2955,7 @@ def birthday():
 
 
 @login_required
+@hx_request_required
 @enter_if_accessible(feature="birthday_view", perm="employee.view_employee")
 def get_employees_birthday(request):
     """
@@ -2961,12 +3027,14 @@ def dashboard(request):
 
 
 @login_required
+@hx_request_required
 def total_employees_count(request):
     employees = Employee.objects.all().count()
     return HttpResponse(employees)
 
 
 @login_required
+@hx_request_required
 def joining_today_count(request):
     newbies_today = 0
     if apps.is_installed("recruitment"):
@@ -2979,6 +3047,7 @@ def joining_today_count(request):
 
 
 @login_required
+@hx_request_required
 def joining_week_count(request):
     newbies_week = 0
     if apps.is_installed("recruitment"):
@@ -2995,6 +3064,7 @@ def joining_week_count(request):
 
 
 @login_required
+@hx_request_required
 def leave_today_count(request):
     leave_today = 0
     if apps.is_installed("leave"):
@@ -3140,6 +3210,8 @@ def employee_select_filter(request):
         context = {"employee_ids": employee_ids, "total_count": total_count}
 
         return JsonResponse(context)
+    else:
+        return JsonResponse({"error": _("Invalid page number")}, status=400)
 
 
 @login_required
@@ -3234,7 +3306,11 @@ def employee_note_update(request, note_id):
         id : stage note instance id
     """
 
-    note = EmployeeNote.objects.get(id=note_id)
+    note = EmployeeNote.find(note_id)
+    if not note:
+        return HorillaRedirect(
+            request, message=_("No Employee Note found matching the query.")
+        )
 
     form = EmployeeNoteForm(instance=note)
     if request.POST:
@@ -3247,9 +3323,7 @@ def employee_note_update(request, note_id):
                 "tabs/update_note.html",
                 {"form": form},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "tabs/update_note.html",
@@ -3268,7 +3342,12 @@ def employee_note_delete(request, note_id):
         id : stage note instance id
     """
 
-    note = EmployeeNote.objects.get(id=note_id)
+    note = EmployeeNote.find(note_id)
+    if not note:
+        return HorillaRedirect(
+            request, message=_("No Employee Note found matching the query.")
+        )
+
     emp_id = note.employee_id.id
     note.delete()
     messages.success(request, _("Note deleted successfully."))
@@ -3406,7 +3485,12 @@ def add_bonus_points(request, emp_id):
     Returns: returns add_points form
     """
 
-    bonus_point = BonusPoint.objects.get(employee_id=emp_id)
+    bonus_point = BonusPoint.find(emp_id)
+    if not bonus_point:
+        return HorillaRedirect(
+            request, message=_("No Bonus Point found matching the query.")
+        )
+
     form = BonusPointAddForm()
     if request.method == "POST":
         form = BonusPointAddForm(
@@ -3424,7 +3508,7 @@ def add_bonus_points(request, emp_id):
                     form.cleaned_data["points"]
                 ),
             )
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(request)
 
     return render(
         request,
@@ -3448,7 +3532,13 @@ def redeem_points(request, emp_id):
 
     Returns: returns redeem_points_form form
     """
-    employee = Employee.objects.get(id=emp_id)
+    try:
+        employee = Employee.objects.get(id=emp_id)
+    except Employee.DoesNotExist:
+        return HorillaRedirect(
+            request, message=_("No Employee found matching the query.")
+        )
+
     avialable_points = 0
     if BonusPoint.objects.filter(employee_id=employee).exists():
         avialable_points = (
@@ -3487,7 +3577,7 @@ def redeem_points(request, emp_id):
                     description=f"{employee} want to redeem {points} points",
                     allowance_on=date.today(),
                 )
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "tabs/forms/redeem_points_form.html",
@@ -3642,7 +3732,7 @@ def encashment_condition_create(request):
             if encashment_form.is_valid():
                 encashment_form.save()
                 messages.success(request, _("Settings updated."))
-                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+                return HorillaRedirect(request)
         else:
             encashment_form = EncashmentGeneralSettingsForm(instance=instance)
 
@@ -3653,7 +3743,7 @@ def encashment_condition_create(request):
         )
 
     messages.warning(request, _("Payroll app not installed"))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -3671,16 +3761,17 @@ def initial_prefix(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Initial prefix updated successfully.")
-            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            return HorillaRedirect(request)
         else:
             messages.error(request, "There was an error updating the prefix.")
     else:
         form = EmployeeGeneralSettingPrefixForm(instance=instance)
 
-    return render(request, "settings/settings.html", {"prefix_form": form})
+    return HorillaRedirect(request)
 
 
 @login_required
+@hx_request_required
 @manager_can_enter("employee.view_employee")
 def first_last_badge(request):
     """
@@ -3741,6 +3832,7 @@ def get_job_positions(request):
 
 
 @login_required
+@hx_request_required
 def get_job_positions_hx(request):
     department_id = request.GET.get("department_id")
     job_position_id = request.GET.get("job_position_id")
@@ -3833,6 +3925,7 @@ def get_position_department(request):
 
 
 @login_required
+@hx_request_required
 def get_job_roles_hx(request):
     """
     Retrieve job roles associated with a specific job position.
@@ -3912,7 +4005,7 @@ def employee_tag_update(request, tag_id):
             form.save()
             form = EmployeeTagForm()
             messages.success(request, _("Tag has been updated successfully!"))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "base/employee_tag/employee_tag_form.html",

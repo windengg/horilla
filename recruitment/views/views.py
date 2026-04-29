@@ -32,7 +32,7 @@ from django.core.mail import EmailMessage
 from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, ProtectedError, Q, When
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -62,6 +62,7 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.group_by import group_by_queryset
+from horilla.http import HorillaRedirect
 from horilla_auth.models import HorillaUser
 from horilla_documents.models import Document
 from notifications.signals import notify
@@ -111,6 +112,7 @@ from recruitment.models import (
     Recruitment,
     RecruitmentGeneralSetting,
     RecruitmentSurvey,
+    RecruitmentSurveyAnswer,
     RejectedCandidate,
     RejectReason,
     Resume,
@@ -281,7 +283,7 @@ def recruitment(request):
                     icon="people-circle",
                     redirect=reverse("pipeline"),
                 )
-            return HttpResponse("<script>location.reload();</script>")
+            return HorillaRedirect(request)
     return render(
         request, "recruitment/recruitment_form.html", {"form": form, "dynamic": dynamic}
     )
@@ -340,7 +342,7 @@ def recruitment_update(request, rec_id):
         messages.error(
             request, _("The recruitment entry you are trying to edit does not exist.")
         )
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
     survey_template_list = []
     survey_templates = RecruitmentSurvey.objects.filter(
         recruitment_ids=rec_id
@@ -515,14 +517,15 @@ def filter_pipeline(request):
 
 
 @login_required
+@hx_request_required
 @manager_can_enter("recruitment.view_recruitment")
 def get_stage_badge_count(request):
     """
     Method to update stage badge count
     """
-    stage_id = request.GET["stage_id"]
-    stage = Stage.objects.get(id=stage_id)
-    count = stage.candidate_set.filter(is_active=True).count()
+    stage_id = request.GET.get("stage_id")
+    stage = Stage.find(stage_id)
+    count = stage.candidate_set.filter(is_active=True).count() if stage else 0
     return HttpResponse(count)
 
 
@@ -532,8 +535,17 @@ def stage_component(request, view: str = "list"):
     """
     This method will stage tab contents
     """
-    recruitment_id = request.GET["rec_id"]
-    recruitment = Recruitment.objects.get(id=recruitment_id)
+    recruitment_id = request.GET.get("rec_id")
+    if not recruitment_id or not (recruitment := Recruitment.find(recruitment_id)):
+        return HorillaRedirect(
+            request,
+            message=(
+                _("Recruitment ID missing.")
+                if not recruitment_id
+                else _("No Recruitment found matching the query.")
+            ),
+        )
+
     ordered_stages = CACHE.get(request.session.session_key + "pipeline")[
         "stages"
     ].filter(recruitment_id__id=recruitment_id)
@@ -556,53 +568,57 @@ def stage_component(request, view: str = "list"):
 @login_required
 @manager_can_enter(perm="recruitment.change_candidate")
 def update_candidate_stage_and_sequence(request):
-    """
-    Update candidate sequence method
-    """
+    """Update candidate sequence"""
+
     order_list = request.GET.getlist("order")
-    stage_id = request.GET["stage_id"]
-    stage = (
-        CACHE.get(request.session.session_key + "pipeline")["stages"]
-        .filter(id=stage_id)
-        .first()
-    )
+    stage_id = request.GET.get("stage_id")
+
+    pipeline_cache = CACHE.get(request.session.session_key + "pipeline")
+    if not pipeline_cache:
+        return JsonResponse({"message": _("Pipeline cache expired.")})
+
+    stage = pipeline_cache["stages"].filter(id=stage_id).first()
+    if not stage:
+        return JsonResponse({"message": _("Stage not found.")})
+
     context = {}
+
     for index, cand_id in enumerate(order_list):
-        candidate = CACHE.get(request.session.session_key + "pipeline")[
-            "candidates"
-        ].filter(id=cand_id)
-        candidate.update(sequence=index, stage_id=stage)
-    if stage.stage_type == "hired":
-        if stage.recruitment_id.is_vacancy_filled():
-            context["message"] = _("Vaccancy is filled")
-            context["vacancy"] = stage.recruitment_id.vacancy
+        pipeline_cache["candidates"].filter(id=cand_id).update(
+            sequence=index, stage_id=stage
+        )
+
+    if stage.stage_type == "hired" and stage.recruitment_id.is_vacancy_filled():
+        context["message"] = _("Vacancy is filled")
+        context["vacancy"] = stage.recruitment_id.vacancy
+
     return JsonResponse(context)
 
 
 @login_required
 @manager_can_enter(perm="recruitment.change_candidate")
 def update_candidate_sequence(request):
-    """
-    Update candidate sequence method
-    """
+    """Update candidate sequence"""
+
     order_list = request.GET.getlist("order")
-    stage_id = request.GET["stage_id"]
-    stage = (
-        CACHE.get(request.session.session_key + "pipeline")["stages"]
-        .filter(id=stage_id)
-        .first()
-    )
-    data = {}
+    stage_id = request.GET.get("stage_id")
+
+    pipeline_cache = CACHE.get(request.session.session_key + "pipeline")
+    if not pipeline_cache:
+        return JsonResponse({"message": _("Pipeline cache expired.")})
+
+    stage = pipeline_cache["stages"].filter(id=stage_id).first()
+    if not stage:
+        return JsonResponse({"message": _("Stage not found.")})
 
     for index, cand_id in enumerate(order_list):
-        candidate = CACHE.get(request.session.session_key + "pipeline")[
-            "candidates"
-        ].filter(id=cand_id)
-        candidate.update(
-            sequence=index, stage_id=stage, hired=(stage.stage_type == "hired")
+        pipeline_cache["candidates"].filter(id=cand_id).update(
+            sequence=index,
+            stage_id=stage,
+            hired=(stage.stage_type == "hired"),
         )
 
-    return JsonResponse(data)
+    return JsonResponse({})
 
 
 def limited_paginator_qry(queryset, page):
@@ -697,9 +713,14 @@ def change_candidate_stage(request):
             except Candidate.DoesNotExist:
                 messages.error(request, _("Candidate not found."))
         return JsonResponse(context)
-    candidate_id = request.GET["candidate_id"]
-    stage_id = request.GET["stage_id"]
-    candidate = Candidate.objects.get(id=candidate_id)
+    stage_id = request.GET.get("stage_id")
+    candidate_id = request.GET.get("candidate_id")
+    candidate = Candidate.find(candidate_id)
+    if not candidate:
+        return HorillaRedirect(
+            request, message=_("No Candidate found matching the query.")
+        )
+
     stage = Stage.objects.filter(
         recruitment_id=candidate.recruitment_id, id=stage_id
     ).first()
@@ -745,7 +766,7 @@ def recruitment_archive(request, rec_id):
         recruitment.save()
     except (Recruitment.DoesNotExist, OverflowError):
         messages.error(request, _("Recruitment Does not exists.."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -782,7 +803,7 @@ def stage_update_pipeline(request, stage_id):
                     redirect=reverse("pipeline"),
                 )
 
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(request, "pipeline/form/stage_update.html", {"form": form})
 
@@ -821,12 +842,7 @@ def recruitment_update_pipeline(request, rec_id):
                     redirect=reverse("pipeline"),
                 )
 
-            response = render(
-                request, "pipeline/form/recruitment_update.html", {"form": form}
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(request, "pipeline/form/recruitment_update.html", {"form": form})
 
 
@@ -843,7 +859,7 @@ def recruitment_close_pipeline(request, rec_id):
         messages.success(request, "Recruitment closed successfully")
     except (Recruitment.DoesNotExist, OverflowError):
         messages.error(request, _("Recruitment Does not exists.."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -852,12 +868,16 @@ def recruitment_reopen_pipeline(request, rec_id):
     """
     This method is used to reopen recruitment from pipeline view
     """
-    recruitment_obj = Recruitment.objects.get(id=rec_id)
+    recruitment_obj = Recruitment.find(rec_id)
+    if not recruitment_obj:
+        return HorillaRedirect(
+            request, message=_("No Recruitment found matching the query.")
+        )
+
     recruitment_obj.closed = False
     recruitment_obj.save()
-
     messages.success(request, "Recruitment reopend successfully")
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -869,8 +889,13 @@ def candidate_stage_update(request, cand_id):
     Args:
         id : candidate_id
     """
-    stage_id = request.POST["stageId"]
-    candidate_obj = Candidate.objects.get(id=cand_id)
+    stage_id = request.POST.get("stageId")
+    candidate_obj = Candidate.find(cand_id)
+    if not candidate_obj:
+        return JsonResponse(
+            {"type": "error", "message": _("No Candidate found matching the query.")}
+        )
+
     history_queryset = candidate_obj.history_set.all().first()
     stage_obj = Stage.objects.get(id=stage_id)
     if candidate_obj.stage_id == stage_obj:
@@ -1009,7 +1034,12 @@ def note_update(request, note_id):
     Args:
         id : stage note instance id
     """
-    note = StageNote.objects.get(id=note_id)
+    note = StageNote.find(note_id)
+    if not note:
+        return HorillaRedirect(
+            request, message=_("No Stage Note found matching the query.")
+        )
+
     form = StageNoteUpdateForm(instance=note)
     if request.POST:
         form = StageNoteUpdateForm(request.POST, request.FILES, instance=note)
@@ -1032,21 +1062,19 @@ def note_update_individual(request, note_id):
     Args:
         id : stage note instance id
     """
-    note = StageNote.objects.get(id=note_id)
+    note = StageNote.find(note_id)
+    if not note:
+        return HorillaRedirect(
+            request, message=_("No Stage Note found matching the query.")
+        )
+
     form = StageNoteForm(instance=note)
     if request.POST:
         form = StageNoteForm(request.POST, request.FILES, instance=note)
         if form.is_valid():
             form.save()
             messages.success(request, _("Note updated successfully..."))
-            response = render(
-                request,
-                "pipeline/pipeline_components/update_note_individual.html",
-                {"form": form},
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "pipeline/pipeline_components/update_note_individual.html",
@@ -1097,17 +1125,20 @@ def add_more_individual_files(request, id):
 
 
 @login_required
+@hx_request_required
 def delete_stage_note_file(request, id):
     """
     This method is used to delete the stage note file
     Args:
         id : stage file instance id
     """
-    script = ""
-    file = StageFiles.objects.get(id=id)
-    file.delete()
-    messages.success(request, _("File deleted successfully"))
-    return HttpResponse(script)
+    if stage_file := StageFiles.find(id):
+        stage_file.delete()
+        messages.success(request, _("File deleted successfully"))
+    else:
+        messages.error(request, _("No Stage Files found matching the query."))
+
+    return HttpResponse("")
 
 
 @login_required
@@ -1143,12 +1174,15 @@ def candidate_schedule_date_update(request):
     """
     This is a an ajax method to update schedule date for a candidate
     """
-    candidate_id = request.POST["candidateId"]
-    schedule_date = request.POST["date"]
-    candidate_obj = Candidate.objects.get(id=candidate_id)
-    candidate_obj.schedule_date = schedule_date
-    candidate_obj.save()
-    return JsonResponse({"message": "congratulations"})
+    candidate_id = request.POST.get("candidateId")
+    schedule_date = request.POST.get("date")
+    candidate_obj = Candidate.find(candidate_id)
+    message = "Error"
+    if candidate_obj:
+        candidate_obj.schedule_date = schedule_date
+        candidate_obj.save()
+        message = "Congratulations"
+    return JsonResponse({"message": message})
 
 
 @login_required
@@ -1200,7 +1234,7 @@ def stage(request):
                     redirect=reverse("pipeline"),
                 )
 
-            return HttpResponse("<script>location.reload();</script>")
+            return HorillaRedirect(request)
     return render(request, "stage/stage_form.html", {"form": form})
 
 
@@ -1236,6 +1270,7 @@ def stage_view(request):
 
 
 @login_required
+@hx_request_required
 def stage_data(request, rec_id):
     stages = StageFilter(request.GET).qs.filter(recruitment_id__id=rec_id)
     previous_data = request.GET.urlencode()
@@ -1287,7 +1322,11 @@ def update_stage_order(request, pk):
     """
     This method is used to update the stage sequence of the onboarding
     """
-    recruitment = Recruitment.objects.get(id=pk)
+    recruitment = Recruitment.find(pk)
+    if not recruitment:
+        return HorillaRedirect(
+            request, message=_("No Recruitment found matching the query.")
+        )
 
     if request.method == "POST":
         try:
@@ -1331,7 +1370,7 @@ def add_candidate(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Candidate Added")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, "pipeline/form/candidate_form.html", {"form": form})
 
 
@@ -1397,15 +1436,21 @@ def candidate(request):
 
 @login_required
 @permission_required(perm="recruitment.add_candidate")
-def recruitment_stage_get(_, rec_id):
+def recruitment_stage_get(request, rec_id):
     """
     This method returns all stages as json
-    Args:
-        id: recruitment_id
     """
-    recruitment_obj = Recruitment.objects.get(id=rec_id)
+    recruitment_obj = Recruitment.find(rec_id)
+
+    if not recruitment_obj:
+        return JsonResponse(
+            {"error": _("No Recruitment found matching the query.")},
+            status=404,
+        )
+
     all_stages = recruitment_obj.stage_set.all()
     all_stage_json = serializers.serialize("json", all_stages)
+
     return JsonResponse({"stages": all_stage_json})
 
 
@@ -1525,6 +1570,7 @@ def interview_view(request):
 
 
 @login_required
+@hx_request_required
 @manager_can_enter(perm="recruitment.change_interviewschedule")
 def interview_employee_remove(request, interview_id, employee_id):
     """
@@ -1533,7 +1579,12 @@ def interview_employee_remove(request, interview_id, employee_id):
         interview_id(int) : primarykey of the interview.
         employee_id(int) : primarykey of the employee
     """
-    interview = InterviewSchedule.objects.filter(id=interview_id).first()
+    interview = InterviewSchedule.find(interview_id)
+    if not interview:
+        return HorillaRedirect(
+            request, message=_("No Meeting found matching the query")
+        )
+
     interview.employee_id.remove(employee_id)
     messages.success(request, "Interviewer removed succesfully.")
     interview.save()
@@ -1616,7 +1667,7 @@ def candidate_about_tab(request, pk, **kwargs):
     candidate_obj = Candidate.find(pk)
     if not candidate_obj:
         messages.error(request, _("Candidate not found"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     return render(
         request,
         "cbv/candidates/profile_about_tab.html",
@@ -1651,11 +1702,13 @@ def candidate_survey_tab(request, pk, **kwargs):
     """
 
     candidate_obj = Candidate.find(pk)
+    survey = RecruitmentSurveyAnswer.objects.filter(candidate_id=pk).first()
     return render(
         request,
         "cbv/candidates/profile_survey_tab.html",
         {
             "candidate": candidate_obj,
+            "survey": survey,
         },
     )
 
@@ -1788,7 +1841,7 @@ def candidate_view_individual(request, cand_id, **kwargs):
     # candidate_obj = Candidate.find(cand_id)
     # # if not candidate_obj:
     # #     messages.error(request, _("Candidate not found"))
-    # #     return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    # #     return HorillaRedirect(request)
 
     # mails = list(Candidate.objects.values_list("email", flat=True))
     # # Query the HorillaUser model to check if any email is present
@@ -1892,7 +1945,7 @@ def candidate_update(request, cand_id, **kwargs):
         return render(request, "candidate/candidate_create_form.html", {"form": form})
     except (Candidate.DoesNotExist, OverflowError):
         messages.error(request, _("Candidate Does not exists.."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @transaction.atomic
@@ -1903,11 +1956,11 @@ def candidate_conversion(request, cand_id, **kwargs):
 
     if not candidate_obj:
         messages.error(request, ("Candidate not found"))
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     if candidate_obj.converted_employee_id:
         messages.info(request, "This candidate is already converted to an employee.")
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
     user_exists = HorillaUser.objects.filter(username=candidate_obj.email).exists()
     employee_exists = Employee.objects.filter(
@@ -1961,7 +2014,7 @@ def candidate_conversion(request, cand_id, **kwargs):
     if "HTTP_HX_REQUEST" in request.META:
         return HttpResponse(status=204, headers={"HX-Refresh": "true"})
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1972,7 +2025,12 @@ def delete_profile_image(request, obj_id):
     Args:
         obj_id : candidate instance id
     """
-    candidate_obj = Candidate.objects.get(id=obj_id)
+    candidate_obj = Candidate.find(obj_id)
+    if not candidate_obj:
+        return HorillaRedirect(
+            request, message=_("No Candidate found matching the query.")
+        )
+
     try:
         if candidate_obj.profile:
             file_path = candidate_obj.profile.path
@@ -1994,7 +2052,12 @@ def candidate_history(request, cand_id):
     Args:
         id : candidate_id
     """
-    candidate_obj = Candidate.objects.get(id=cand_id)
+    candidate_obj = Candidate.find(cand_id)
+    if not candidate_obj:
+        return HorillaRedirect(
+            request, message=_("No Candidate found matching the query.")
+        )
+
     candidate_history_queryset = candidate_obj.history.all()
     return render(
         request,
@@ -2072,7 +2135,7 @@ def interview_schedule(request, cand_id):
             )
 
             messages.success(request, "Interview Scheduled successfully.")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, template, {"form": form, "cand_id": cand_id})
 
 
@@ -2131,7 +2194,7 @@ def interview_delete(request, interview_id):
     except:
         messages.error(request, _("Scheduled Interview not found"))
 
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -2175,7 +2238,7 @@ def interview_edit(request, interview_id):
                 redirect=reverse("interview-view"),
             )
             messages.success(request, "Interview updated successfully.")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         template,
@@ -2190,9 +2253,15 @@ def interview_edit(request, interview_id):
 @login_required
 def get_interview_managers(request):
     cand_id = request.GET.get("candidate_id")
-    form = ScheduleInterviewForm()
-    candidate_obj = Candidate.objects.get(id=cand_id)
+    if not cand_id or not (candidate_obj := Candidate.find(cand_id)):
+        message = (
+            _("Missing Candidate ID")
+            if not cand_id
+            else _("No Candidate found matching the query.")
+        )
+        return HorillaRedirect(request, message=message)
 
+    form = ScheduleInterviewForm()
     managers = candidate_obj.recruitment_id.recruitment_managers.all()
 
     form.fields["employee_id"].queryset = managers
@@ -2210,7 +2279,10 @@ def get_interview_managers(request):
 @login_required
 def get_managers(request):
     cand_id = request.GET.get("cand_id")
-    candidate_obj = Candidate.objects.get(id=cand_id)
+    candidate_obj = Candidate.find(cand_id)
+    if not candidate_obj:
+        return JsonResponse({"employees": {}})
+
     stage_obj = Stage.objects.filter(recruitment_id=candidate_obj.recruitment_id.id)
 
     # Combine the querysets into a single iterable
@@ -2294,7 +2366,7 @@ def send_acknowledgement(request):
         except Exception as e:
             logger.exception(e)
             messages.error(request, "Something went wrong")
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -2303,7 +2375,7 @@ def candidate_sequence_update(request):
     """
     This method is used to update the sequence of candidate
     """
-    sequence_data = json.loads(request.POST["sequenceData"])
+    sequence_data = json.loads(request.POST.get("sequenceData", "{}"))
     for cand_id, seq in sequence_data.items():
         cand = Candidate.objects.get(id=cand_id)
         cand.sequence = seq
@@ -2318,7 +2390,10 @@ def stage_sequence_update(request):
     """
     This method is used to update the sequence of the stages
     """
-    sequence_data = json.loads(request.POST["sequence"])
+    sequence_data = json.loads(request.POST.get("sequence", "{}"))
+    if not sequence_data:
+        return JsonResponse({"type": "error", "message": _("Missing Sequence")})
+
     for stage_id, seq in sequence_data.items():
         stage = Stage.objects.get(id=stage_id)
         stage.sequence = seq
@@ -2377,13 +2452,16 @@ def create_candidate_rating(request, cand_id):
     Args:
         cand_id : candidate instance id
     """
-    cand_id = cand_id
-    candidate = Candidate.objects.get(id=cand_id)
-    employee_id = request.user.employee_get
-    rating = request.POST.get("rating")
-    CandidateRating.objects.create(
-        candidate_id=candidate, rating=rating, employee_id=employee_id
-    )
+    candidate = Candidate.find(cand_id)
+    if candidate:
+        employee_id = request.user.employee_get
+        rating = request.POST.get("rating")
+        CandidateRating.objects.create(
+            candidate_id=candidate, rating=rating, employee_id=employee_id
+        )
+    else:
+        messages.error(request, _("No Candidate found matching the query"))
+
     return redirect(recruitment_pipeline)
 
 
@@ -2661,7 +2739,7 @@ def skill_zone_candidate_create(request, sz_id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Candidate added successfully."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
     return render(request, template, {"form": form, "sz_id": sz_id})
 
@@ -2688,7 +2766,7 @@ def skill_zone_cand_edit(request, sz_cand_id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Candidate edited successfully."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, template, {"form": form, "sz_cand_id": sz_cand_id})
 
 
@@ -2717,6 +2795,7 @@ def skill_zone_cand_delete(request, sz_cand_id):
 
 
 @login_required
+@hx_request_required
 @manager_can_enter(perm="recruitment.view_skillzonecandidate")
 def skill_zone_cand_filter(request):
     """
@@ -2769,8 +2848,8 @@ def skill_zone_cand_archive(request, sz_cand_id):
             messages.success(request, _("Candidate unarchived successfully.."))
 
         skill_zone_cand.save()
-    except SkillZone.DoesNotExist:
-        messages.error(request, _("Candidate not found."))
+    except SkillZoneCandidate.DoesNotExist:
+        messages.error(request, _("No Candidate found matching the query."))
     return redirect(skill_zone_view)
 
 
@@ -2810,7 +2889,7 @@ def to_skill_zone(request, cand_id):
         or request.user.has_perm("recruitment.add_skillzonecandidate")
     ):
         messages.info(request, "You dont have permission.")
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
     candidate = Candidate.objects.get(id=cand_id)
     template = "skill_zone_cand/to_skill_zone_form.html"
@@ -2836,7 +2915,7 @@ def to_skill_zone(request, cand_id):
                     zone_candidate.reason = form.cleaned_data["reason"]
                     zone_candidate.save()
             messages.success(request, "Candidate Added to skill zone successfully")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, template, {"form": form, "cand_id": cand_id})
 
 
@@ -2847,13 +2926,18 @@ def update_candidate_rating(request, cand_id):
     Args:
         id : candidate rating instance id
     """
-    cand_id = cand_id
-    candidate = Candidate.objects.get(id=cand_id)
-    employee_id = request.user.employee_get
-    rating = request.POST.get("rating")
-    rate = CandidateRating.objects.get(candidate_id=candidate, employee_id=employee_id)
-    rate.rating = int(rating)
-    rate.save()
+    candidate = Candidate.find(cand_id)
+    if candidate:
+        employee_id = request.user.employee_get
+        rating = request.POST.get("rating")
+        rate = CandidateRating.objects.get(
+            candidate_id=candidate, employee_id=employee_id
+        )
+        rate.rating = int(rating)
+        rate.save()
+    else:
+        messages.error(request, _("No Candidate found matching the query"))
+
     return redirect(recruitment_pipeline)
 
 
@@ -2873,6 +2957,7 @@ def open_recruitments(request):
     return response
 
 
+@login_required
 @hx_request_required
 def recruitment_details(request, id):
     """
@@ -2988,7 +3073,7 @@ def candidate_self_status_tracking(request):
         candidate_id = request.session.get("candidate_id")
 
         if not candidate_id:
-            return redirect("candidate-login")
+            return redirect("candidate-login/")
 
         candidate = Candidate.objects.get(pk=candidate_id)
         interviews = candidate.candidate_interview.annotate(
@@ -3028,7 +3113,7 @@ def candidate_self_status_tracking_managers_view(request, cand_id):
             candidate_id = cand_id
 
         if not candidate_id:
-            return redirect("candidate-login")
+            return redirect("candidate-login/")
 
         candidate = Candidate.objects.get(pk=candidate_id)
         interviews = candidate.candidate_interview.annotate(
@@ -3064,7 +3149,7 @@ def create_reject_reason(request):
         if form.is_valid():
             form.save()
             messages.success(request, "Reject reason saved")
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(request, "settings/reject_reason_form.html", {"form": form})
 
 
@@ -3078,19 +3163,26 @@ def self_tracking_feature(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("recruitment.delete_rejectreason")
 def delete_reject_reason(request):
     """
     This method is used to delete the reject reasons
     """
     id = request.GET.get("id")
-    reason = RejectReason.objects.get(id=id)
-    count = RejectReason.objects.count()
-    reason.delete()
-    messages.success(request, f"{reason.title} is deleted.")
-    if count == 1:
+    if not (reason := RejectReason.find(id)):
+        messages.error(request, _("No Reject Reason found matching the query."))
         return HttpResponse("<script>$('.reload-record').click();</script>")
-    return HttpResponse("<script>$('#reloadMessagesButton').click();</script>")
+
+    is_last = RejectReason.objects.count() == 1
+    reason.delete()
+    messages.success(request, _(f"{reason.title} is deleted."))
+    script = (
+        "$('.reload-record').click();"
+        if is_last
+        else "$('#reloadMessagesButton').click();"
+    )
+    return HttpResponse(f"<script>{script}</script>")
 
 
 def extract_text_with_font_info(pdf):
@@ -3178,17 +3270,6 @@ def extract_info(pdf):
     Args:
         pdf_file: pdf file
     """
-
-    text_info = extract_text_with_font_info(pdf)
-    ranked_text = rank_text(text_info)
-
-    phone_pattern = re.compile(r"\b\+?\d{1,2}\s?\d{9,10}\b")
-    dob_pattern = re.compile(
-        r"\b(?:\d{1,2}|\d{4})[-/.,]\d{1,2}[-/.,](?:\d{1,2}|\d{4})\b"
-    )
-    email_pattern = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-    zip_code_pattern = re.compile(r"\b\d{5,6}(?:-\d{4})?\b")
-
     extracted_info = {
         "full_name": "",
         "address": "",
@@ -3199,6 +3280,18 @@ def extract_info(pdf):
         "email_id": "",
         "zip": "",
     }
+    if not pdf:
+        return extracted_info
+
+    text_info = extract_text_with_font_info(pdf)
+    ranked_text = rank_text(text_info)
+
+    phone_pattern = re.compile(r"\b\+?\d{1,2}\s?\d{9,10}\b")
+    dob_pattern = re.compile(
+        r"\b(?:\d{1,2}|\d{4})[-/.,]\d{1,2}[-/.,](?:\d{1,2}|\d{4})\b"
+    )
+    email_pattern = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+    zip_code_pattern = re.compile(r"\b\d{5,6}(?:-\d{4})?\b")
 
     name_candidates = [
         item["text"]
@@ -3253,7 +3346,7 @@ def resume_completion(request):
     """
     This function is returns the data for completing the candidate creation form
     """
-    resume_file = request.FILES["resume"]
+    resume_file = request.FILES.get("resume")
     contact_info = extract_info(resume_file)
 
     return JsonResponse(contact_info)
@@ -3281,6 +3374,7 @@ def skills_view(request):
 
 
 @login_required
+@hx_request_required
 def create_skills(request):
     """
     This method is used to create the skills
@@ -3328,6 +3422,7 @@ def create_skills(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("recruitment.delete_rejectreason")
 def delete_skills(request, id=None):
     """
@@ -3546,6 +3641,7 @@ def hired_candidate_chart(request):
 
 
 @login_required
+@hx_request_required
 def candidate_document_request(request):
     """
     This function is used to create document requests of an employee in employee requests view.
@@ -3564,7 +3660,7 @@ def candidate_document_request(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Document request created successfully"))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -3594,7 +3690,7 @@ def document_create(request, id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Document created successfully."))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -3663,7 +3759,7 @@ def document_delete(request, id):
         clear_messages(request)
         return HttpResponse()
     else:
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
 
 
 @candidate_login_required
@@ -3687,7 +3783,7 @@ def file_upload(request, id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Document uploaded successfully"))
-            return HttpResponse("<script>window.location.reload();</script>")
+            return HorillaRedirect(request)
 
     context = {
         "form": form,
@@ -3752,7 +3848,7 @@ def document_approve(request, id):
     else:
         messages.error(request, _("No document uploaded"))
 
-    return HttpResponse("<script>window.location.reload();</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -3780,10 +3876,10 @@ def document_reject(request, id):
                 document_obj.save()
                 messages.error(request, _("Document request rejected"))
 
-                return HttpResponse("<script>window.location.reload();</script>")
+                return HorillaRedirect(request)
     else:
         messages.error(request, _("No document uploaded"))
-        return HttpResponse("<script>window.location.reload();</script>")
+        return HorillaRedirect(request)
 
     return render(
         request,
@@ -3798,7 +3894,12 @@ def candidate_add_notes(request, cand_id):
     This method renders template component to add candidate remark
     """
 
-    candidate = Candidate.objects.get(id=cand_id)
+    candidate = Candidate.find(cand_id)
+    if not candidate:
+        return HorillaRedirect(
+            request, message=_("No Candidate found matching the query.")
+        )
+
     updated_by = request.user.employee_get if request.user.is_authenticated else None
     label = (
         request.user.employee_get.get_full_name()
@@ -3887,4 +3988,4 @@ def delete_candidate_rejection(request, rej_id):
             messages.error(request, "Candidate rejection not found")
     except Exception as e:
         messages.error(request, "Error occurred while deleting candidate rejection")
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)

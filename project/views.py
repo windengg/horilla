@@ -6,23 +6,20 @@ from collections import defaultdict
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
-import xlsxwriter
 from django.contrib import messages
 from django.core import serializers
-from django.core.exceptions import ValidationError
-from django.core.paginator import Paginator
-from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
+from django.views.decorators.http import require_http_methods
 
 from base.methods import filtersubordinates, get_key_instances
 from horilla.decorators import hx_request_required, login_required, permission_required
+from horilla.http import HorillaRedirect
+from horilla.methods import handle_no_permission
 from notifications.signals import notify
-from project.cbv.projects import DynamicProjectCreationFormView
-from project.cbv.tasks import DynamicTaskCreateFormView
-from project.cbv.timesheet import TimeSheetFormView
 from project.methods import (
     generate_colors,
     paginator_qry,
@@ -37,9 +34,6 @@ from .forms import *
 from .methods import (
     is_project_manager_or_super_user,
     is_projectmanager_or_member_or_perms,
-    is_task_manager,
-    is_task_member,
-    you_dont_have_permission,
 )
 from .models import *
 
@@ -209,10 +203,7 @@ def create_project(request):
                 "project/new/forms/project_creation.html",
                 context={"form": form},
             )
-
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request, "project/new/forms/project_creation.html", context={"form": form}
     )
@@ -245,9 +236,7 @@ def project_update(request, project_id):
                 "project/new/forms/project_update.html",
                 {"form": project_form, "project_id": project_id},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "project/new/forms/project_update.html",
@@ -323,6 +312,7 @@ def project_delete(request, project_id):
 
 
 @login_required
+@hx_request_required
 def project_filter(request):
     """
     For filtering projects
@@ -533,7 +523,9 @@ def project_bulk_export(request):
     """
     This method is used to export bulk of Project instances
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        return HorillaRedirect(request, message=_("No project IDs were provided."))
     ids = json.loads(ids)
     data_list = []
     # Add headers to the worksheet
@@ -549,7 +541,9 @@ def project_bulk_export(request):
 
     # Get the list of field names for your model
     for project_id in ids:
-        project = Project.objects.get(id=project_id)
+        project = Project.find(project_id)
+        if not project:
+            continue  # Skip if project not found
         data = {
             "Title": f"{project.title}",
             "Managers": f"{',' .join([manager.employee_first_name + ' ' + manager.employee_last_name for manager in project.managers.all()]) if project.managers.exists() else ''}",
@@ -618,6 +612,7 @@ def project_bulk_export(request):
 
 
 @login_required
+@hx_request_required
 def project_bulk_archive(request):
     try:
         ids = request.POST.getlist("ids")
@@ -654,6 +649,7 @@ def project_bulk_archive(request):
 
 
 @login_required
+@hx_request_required
 # @permission_required("project.delete_project")
 def project_bulk_delete(request):
     """
@@ -713,7 +709,7 @@ def project_archive(request, project_id):
     if not project.is_active:
         message = _(f"{project} Archived successfully.")
     messages.success(request, message)
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER"))
+    return HorillaRedirect(request)
 
 
 # Task views
@@ -784,7 +780,7 @@ def quick_create_task(request, stage_id):
             },
         )
     messages.info(request, "You dont have permission.")
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -811,17 +807,14 @@ def create_task(request, stage_id):
                     "task/new/forms/create_task.html",
                     context={"form": form, "stage_id": stage_id},
                 )
-                return HttpResponse(
-                    response.content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
         return render(
             request,
             "task/new/forms/create_task.html",
             context={"form": form, "stage_id": stage_id},
         )
     messages.info(request, "You dont have permission.")
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -829,7 +822,9 @@ def create_task_in_project(request, project_id):
     """
     For creating new task in project view
     """
-    project = Project.objects.get(id=project_id)
+    project = Project.find(project_id)
+    if not project:
+        return HorillaRedirect(request, message=_("Project not found"))
     stages = project.project_stages.all()
 
     # Serialize the queryset to JSON
@@ -849,10 +844,7 @@ def create_task_in_project(request, project_id):
                     "task/new/forms/create_task_project.html",
                     context={"form": form, "project_id": project_id},
                 )
-                return HttpResponse(
-                    response.content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
         context = {
             "form": form,
             "project_id": project_id,
@@ -862,7 +854,7 @@ def create_task_in_project(request, project_id):
             request, "task/new/forms/create_task_project.html", context=context
         )
     messages.info(request, "You dont have permission.")
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -885,9 +877,7 @@ def update_task(request, task_id):
                 "task/new/forms/update_task.html",
                 {"form": task_form, "task_id": task_id},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "task/new/forms/update_task.html",
@@ -933,7 +923,9 @@ def task_details(request, task_id):
     """
     For showing all details about task
     """
-    task = Task.objects.get(id=task_id)
+    task = Task.objects.filter(id=task_id).first()
+    if not task:
+        return HorillaRedirect(request, message=_("Task not found"))
     return render(request, "task/new/task_details.html", context={"task": task})
 
 
@@ -978,9 +970,15 @@ def task_stage_change(request):
     """
     This method is used to change the current stage of a task
     """
-    task_id = request.POST["task"]
-    stage_id = request.POST["stage"]
-    stage = ProjectStage.objects.get(id=stage_id)
+    task_id = request.POST.get("task")
+    stage_id = request.POST.get("stage")
+    if not task_id or not stage_id:
+        messages.error(request, _("Missing required parameters"))
+        return JsonResponse({"error": "Missing required parameters"}, status=400)
+    stage = ProjectStage.objects.filter(id=stage_id).first()
+    if not stage:
+        messages.error(request, _("Stage not found"))
+        return JsonResponse({"error": "Stage not found"}, status=404)
     Task.objects.filter(id=task_id).update(stage=stage)
     return JsonResponse(
         {
@@ -1020,9 +1018,7 @@ def create_timesheet_task(request, task_id):
                 "task/new/forms/create_timesheet.html",
                 {"form": form, "task_id": task_id},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     context = {
         "form": form,
         "task_id": task_id,
@@ -1032,7 +1028,9 @@ def create_timesheet_task(request, task_id):
 
 @login_required
 def update_timesheet_task(request, timesheet_id):
-    timesheet = TimeSheet.objects.get(id=timesheet_id)
+    timesheet = TimeSheet.objects.filter(id=timesheet_id).first()
+    if not timesheet:
+        return HorillaRedirect(request, message=_("Timesheet not found"))
     form = TimesheetInTaskForm(instance=timesheet)
     if request.method == "POST":
         form = TimesheetInTaskForm(request.POST, instance=timesheet)
@@ -1044,9 +1042,7 @@ def update_timesheet_task(request, timesheet_id):
                 "task/new/forms/update_timesheet.html",
                 {"form": form, "timesheet_id": timesheet_id},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     context = {
         "form": form,
         "timesheet_id": timesheet_id,
@@ -1059,11 +1055,23 @@ def drag_and_drop_task(request):
     """
     For drag and drop task into new stage
     """
-    updated_stage_id = request.POST["updated_stage_id"]
-    previous_task_id = request.POST["previous_task_id"]
-    previous_stage_id = request.POST["previous_stage_id"]
+    updated_stage_id = request.POST.get("updated_stage_id")
+    previous_task_id = request.POST.get("previous_task_id")
+    previous_stage_id = request.POST.get("previous_stage_id")
+    if not updated_stage_id or not previous_task_id or not previous_stage_id:
+        messages.error(request, _("Missing required parameters."))
+        return JsonResponse({"error": "Missing required parameters."}, status=400)
+
     change = False
-    task = Task.objects.get(id=previous_task_id)
+    task = Task.objects.filter(id=previous_task_id).first()
+    if not task:
+        messages.error(request, _("Task not found"))
+        return JsonResponse({"error": "Task not found"}, status=404)
+
+    if task.end_date and task.end_date < date.today():
+        messages.warning(request, _("Cannot update status. Task has already expired."))
+        return JsonResponse({"change": True})
+
     project = task.project
     if (
         request.user.has_perm("project.change_task")
@@ -1134,9 +1142,7 @@ def task_all_create(request):
                     "form": form,
                 },
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "task_all/forms/create_taskall.html",
@@ -1149,7 +1155,9 @@ def task_all_create(request):
 @login_required
 def update_project_task_status(request, task_id):
     status = request.GET.get("status")
-    task = get_object_or_404(Task, id=task_id)
+    task = Task.find(task_id)
+    if not task:
+        return HorillaRedirect(request, message=_("Task not found"))
 
     if task.end_date and task.end_date < date.today():
         messages.warning(request, _("Cannot update status. Task has already expired."))
@@ -1175,9 +1183,7 @@ def update_task_all(request, task_id):
                 "task_all/forms/update_taskall.html",
                 context={"form": form, "task_id": task_id},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "task_all/forms/update_taskall.html",
@@ -1186,6 +1192,7 @@ def update_task_all(request, task_id):
 
 
 @login_required
+@hx_request_required
 def task_all_filter(request):
     """
     For filtering tasks in task all view
@@ -1219,13 +1226,18 @@ def task_all_bulk_archive(request):
     """
     This method is used to archive bulk of Task instances
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        messages.error(request, _("Missing required parameter: ids"))
+        return JsonResponse({"error": "Missing required parameter: ids"}, status=400)
     ids = json.loads(ids)
     is_active = False
     if request.GET.get("is_active") == "True":
         is_active = True
     for task_id in ids:
-        task = Task.objects.get(id=task_id)
+        task = Task.objects.filter(id=task_id).first()
+        if not task:
+            continue  # Skip if task not found
         task.is_active = is_active
         task.save()
         message = _("archived")
@@ -1241,11 +1253,16 @@ def task_all_bulk_delete(request):
     """
     This method is used to delete set of Task instances
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+    if not ids:
+        messages.error(request, _("Missing required parameter: ids"))
+        return JsonResponse({"error": "Missing required parameter: ids"}, status=400)
     ids = json.loads(ids)
     del_ids = []
     for task_id in ids:
-        task = Task.objects.get(id=task_id)
+        task = Task.find(task_id)
+        if not task:
+            continue  # Skip if task not found
         try:
             task.delete()
             del_ids.append(task)
@@ -1264,7 +1281,9 @@ def task_all_archive(request, task_id):
     Args:
             task_id : Task instance id
     """
-    task = Task.objects.get(id=task_id)
+    task = Task.objects.filter(id=task_id).first()
+    if not task:
+        return HorillaRedirect(request, message=_("Task not found"))
     task.is_active = not task.is_active
     task.save()
     message = _(f"{task} un-archived")
@@ -1274,7 +1293,7 @@ def task_all_archive(request, task_id):
     # return HttpResponse("<script>$('.oh-btn--view').click();</script>")
     # return HttpResponse("<script>$('#hiddenbutton').click();</script>")
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER"))
+    return HorillaRedirect(request)
 
 
 # Project stage views
@@ -1302,9 +1321,7 @@ def create_project_stage(request, project_id):
                 "project_stage/forms/create_project_stage.html",
                 context,
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     context = {"form": form, "project_id": project_id}
     return render(request, "project_stage/forms/create_project_stage.html", context)
 
@@ -1327,9 +1344,7 @@ def update_project_stage(request, stage_id):
                 "project_stage/forms/update_project_stage.html",
                 context={"form": form, "stage_id": stage_id},
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "project_stage/forms/update_project_stage.html",
@@ -1346,7 +1361,9 @@ def delete_project_stage(request, stage_id):
     view_type = request.GET.get("view")
     if view_type == None:
         view_type = "list"
-    stage = ProjectStage.objects.get(id=stage_id)
+    stage = ProjectStage.objects.filter(id=stage_id).first()
+    if not stage:
+        return HorillaRedirect(request, message=_("Project stage not found"))
     tasks = Task.objects.filter(stage=stage)
     project_id = stage.project.id
     if not tasks:
@@ -1365,6 +1382,7 @@ def delete_project_stage(request, stage_id):
 
 
 @login_required
+@hx_request_required
 def get_stages(request):
     """
     This is an ajax method to return json response to take only stages related
@@ -1392,13 +1410,17 @@ def get_stages(request):
 
 
 @login_required
+@hx_request_required
 def create_stage_taskall(request):
     """
     This is an ajax method to return json response to create stage related
     to the project in the task-all form fields
     """
     if request.method == "GET":
-        project_id = request.GET["project_id"]
+        project_id = request.GET.get("project_id")
+        if not project_id:
+            messages.error(request, _("Missing required parameters: project_id"))
+            return JsonResponse({"error": "Missing required parameters: project_id"})
         project = Project.objects.get(id=project_id)
         form = ProjectStageForm(initial={"project": project})
     if request.method == "POST":
@@ -1420,7 +1442,10 @@ def drag_and_drop_stage(request):
     """
     For drag and drop project stage into new sequence
     """
-    sequence = request.POST["sequence"]
+    sequence = request.POST.get("sequence")
+    if not sequence:
+        messages.error(request, _("Missing required parameters: sequence"))
+        return JsonResponse({"error": "Missing required parameters: sequence"})
     sequence = json.loads(sequence)
     stage_id = list(sequence.keys())[0]
     project = ProjectStage.objects.get(id=stage_id).project
@@ -1502,6 +1527,7 @@ def time_sheet_view(request):
 
 
 @login_required
+@hx_request_required
 def get_members(request):
     project_id = request.GET.get("project_id")
     task_id = request.GET.get("task_id")
@@ -1540,6 +1566,7 @@ def get_members(request):
 
 
 @login_required
+@hx_request_required
 def get_tasks_in_timesheet(request):
     project_id = request.GET.get("project_id")
     form = TimeSheetForm()
@@ -1616,13 +1643,12 @@ def time_sheet_creation(request):
             response = render(
                 request, "time_sheet/form-create.html", context={"form": form}
             )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(request, "time_sheet/form-create.html", context={"form": form})
 
 
 @login_required
+@hx_request_required
 def time_sheet_project_creation(request):
     """
     View function to handle the creation of a new project from time sheet form.
@@ -1666,7 +1692,11 @@ def time_sheet_task_creation(request):
         or the validation errors in case of an invalid form submission.
     """
     if request.method == "GET":
-        project_id = request.GET["project_id"]
+        project_id = request.GET.get("project_id")
+        if not project_id:
+            return HorillaRedirect(
+                request, message=_("Missing required parameters: project_id")
+            )
         project = Project.objects.get(id=project_id)
         stages = ProjectStage.objects.filter(project__id=project_id)
         task_form = TaskTimeSheetForm(initial={"project": project})
@@ -1715,10 +1745,7 @@ def time_sheet_update(request, time_sheet_id):
                 response = render(
                     request, "time_sheet/form-create.html", context={"form": form}
                 )
-                return HttpResponse(
-                    response.content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
+                return HorillaRedirect(request)
         return render(
             request,
             "time_sheet/form-update.html",
@@ -1728,7 +1755,7 @@ def time_sheet_update(request, time_sheet_id):
         )
     else:
         messages.error(request, "You dont have permission.")
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
 
 
 @login_required
@@ -1741,11 +1768,15 @@ def time_sheet_delete(request, time_sheet_id):
         time_sheet_id (int): The ID of the time sheet to be deleted.
 
     Returns:
-        HttpResponseRedirect: A redirect response to the time sheet view page.
+        HorillaRedirect: A redirect response to the time sheet view page.
     """
     if time_sheet_delete_permissions(request, time_sheet_id):
-        TimeSheet.objects.get(id=time_sheet_id).delete()
-        messages.success(request, _("The time sheet has been deleted successfully"))
+        timesheet = TimeSheet.objects.filter(id=time_sheet_id).first()
+        if not timesheet:
+            messages.error(request, _("Timesheet not found."))
+            return HorillaRedirect(request)
+        timesheet.delete()
+        messages.success(request, _("The time sheet has been deleted successfully."))
         view_type = "card"
         if request.GET.get("view") == "list":
             view_type = "list"
@@ -1753,11 +1784,12 @@ def time_sheet_delete(request, time_sheet_id):
         if task_id:
             return redirect(f"/project/task-timesheet/{task_id}/")
         return redirect("/project/view-time-sheet" + "?view=" + view_type)
-    else:
-        return you_dont_have_permission(request)
+
+    return handle_no_permission(request)
 
 
 @login_required
+@hx_request_required
 def time_sheet_filter(request):
     """
     Filter Time sheet based on the provided query parameters.
@@ -1801,12 +1833,17 @@ def time_sheet_filter(request):
 
 
 @login_required
+@hx_request_required
 def time_sheet_initial(request):
     """
     This is an ajax method to return json response to take only tasks related
     to the project in the timesheet form fields
     """
-    project_id = request.GET["project_id"]
+    project_id = request.GET.get("project_id")
+    if not project_id:
+        messages.error(request, _("Missing required parameters: project_id."))
+        return JsonResponse({"error": "Missing required parameters: project_id."})
+
     tasks = Task.objects.filter(project=project_id).values("title", "id")
     return JsonResponse({"data": list(tasks)})
 
@@ -1814,45 +1851,57 @@ def time_sheet_initial(request):
 @login_required
 def personal_time_sheet(request):
     """
-    This is an ajax method to return json response for generating bar charts to employees.
+    Ajax method to return JSON response for generating bar charts for employees.
     """
-    emp_id = request.GET["emp_id"]
-    selected = request.GET["selected"]
-    month_number = request.GET["month"]
-    year = request.GET["year"]
-    week_number = request.GET["week"]
+
+    emp_id = request.GET.get("emp_id")
+    selected = request.GET.get("selected")
+    month_number = request.GET.get("month")
+    year = request.GET.get("year")
+    week_number = request.GET.get("week")
+
+    # Validate required parameters
+    if not emp_id or not selected or not year:
+        messages.error(request, _("Missing required parameters"))
+        return JsonResponse({"error": "Missing required parameters"}, status=400)
 
     time_spent = []
     dataset = []
 
     projects = Project.objects.filter(project_timesheet__employee_id=emp_id).distinct()
-
     time_sheets = TimeSheet.objects.filter(employee_id=emp_id).order_by("date")
 
-    time_sheets = time_sheets.filter(date__week=week_number)
+    if week_number:
+        time_sheets = time_sheets.filter(date__week=week_number)
 
-    # check for labels to be genarated weeky or monthly
-    if selected == "week":
+    # Generate labels
+    if selected == "week" and week_number:
         start_date = datetime.date.fromisocalendar(int(year), int(week_number), 1)
 
         date_list = []
         labels = []
+
         for i in range(7):
             day = start_date + datetime.timedelta(days=i)
             date_list.append(day)
-            day = day.strftime("%d-%m-%Y %A")
-            labels.append(day)
+            labels.append(day.strftime("%d-%m-%Y %A"))
 
-    elif selected == "month":
+    elif selected == "month" and month_number:
         days_in_month = calendar.monthrange(int(year), int(month_number) + 1)[1]
         start_date = datetime.datetime(int(year), int(month_number) + 1, 1).date()
-        labels = []
+
         date_list = []
+        labels = []
+
         for i in range(days_in_month):
             day = start_date + datetime.timedelta(days=i)
             date_list.append(day)
-            day = day.strftime("%d-%m-%Y")
-            labels.append(day)
+            labels.append(day.strftime("%d-%m-%Y"))
+
+    else:
+        messages.error(request, _("Invalid selection"))
+        return JsonResponse({"error": "Invalid selection"}, status=400)
+
     colors = generate_colors(len(projects))
 
     for project, color in zip(projects, colors):
@@ -1864,15 +1913,15 @@ def personal_time_sheet(request):
             }
         )
 
-    # Calculate total hours for each project on each date
     total_hours_by_project_and_date = defaultdict(lambda: defaultdict(float))
 
-    # addding values to the response
     for label in date_list:
         time_sheets = TimeSheet.objects.filter(employee_id=emp_id, date=label)
+
         for time in time_sheets:
             time_spent = strtime_seconds(time.time_spent) / 3600
             total_hours_by_project_and_date[time.project_id.title][label] += time_spent
+
     for data in dataset:
         project_title = data["label"]
         data["data"] = [
@@ -1883,6 +1932,7 @@ def personal_time_sheet(request):
         "dataSet": dataset,
         "labels": labels,
     }
+
     return JsonResponse(response)
 
 
@@ -1898,18 +1948,13 @@ def personal_time_sheet_view(request, emp_id):
         Renders the chart.html template containing barchat of the specific employee.
 
     """
-    Employee.objects.get(id=emp_id)
-    emp_last_name = (
-        Employee.objects.get(id=emp_id).employee_last_name
-        if Employee.objects.get(id=emp_id).employee_last_name != None
-        else ""
-    )
-    employee_name = (
-        f"{Employee.objects.get(id=emp_id).employee_first_name}  {emp_last_name}"
-    )
+    emp = Employee.objects.filter(id=emp_id).first()
+    if not emp:
+        messages.error(request, _("Employee not found."))
+        return HorillaRedirect(request)
     context = {
         "emp_id": emp_id,
-        "emp_name": employee_name,
+        "emp_name": emp.get_full_name(),
     }
 
     return render(request, "time_sheet/chart.html", context=context)
@@ -1928,18 +1973,27 @@ def time_sheet_single_view(request, time_sheet_id):
         The rendered timesheet single view page.
 
     """
-    timesheet = TimeSheet.objects.get(id=time_sheet_id)
+    timesheet = TimeSheet.find(time_sheet_id)
+    if not timesheet:
+        messages.error(request, _("Timesheet doesn't exist."))
+        return HorillaRedirect(request)
     context = {"time_sheet": timesheet}
     return render(request, "time_sheet/time_sheet_single_view.html", context)
 
 
 @login_required
+@require_http_methods(["POST"])
 def time_sheet_bulk_delete(request):
     """
     This method is used to delete set of Task instances
     """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids")
+
+    if not ids:
+        messages.error(request, _("No ids provided."))
+        return JsonResponse({"error": "No ids provided"}, status=400)
     ids = json.loads(ids)
+
     for timesheet_id in ids:
         timesheet = TimeSheet.objects.get(id=timesheet_id)
         try:

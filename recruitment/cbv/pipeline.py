@@ -254,6 +254,7 @@ class CandidateList(HorillaListView):
         "mobile": """ style="width:100px;" """,
         "Stage": """ style="width:100px;" """,
         "get_interview_count": """ style="width:200px;" """,
+        "option": """ style="width:280px !important" """,
     }
     columns = [
         (_("Name"), "candidate_name", "get_avatar"),
@@ -262,7 +263,18 @@ class CandidateList(HorillaListView):
         (_("Rating"), "rating_bar"),
         (_("Hired Date"), "hired_date"),
         (_("Scheduled Interview"), "get_interview_count"),
-        (_("Job Position"), "job_position_id"),
+        (_("Job Position"), "job_position_id__job_position"),
+        (_("Contact"), "mobile"),
+    ]
+
+    export_columns = [
+        (_("Name"), "candidate_name", "get_avatar"),
+        (_("Email"), "mail_indication"),
+        (_("Stage"), "stage_id"),
+        (_("Rating"), "get_avg_rating"),
+        (_("Hired Date"), "hired_date"),
+        (_("Scheduled Interview"), "get_total_interview"),
+        (_("Job Position"), "job_position_id__job_position"),
         (_("Contact"), "mobile"),
     ]
 
@@ -284,11 +296,6 @@ class CandidateList(HorillaListView):
         hx-target="#genericModalBody"
     """
 
-    header_attrs = {
-        "option": """
-            style="width:280px !important"
-        """
-    }
     actions = [
         {
             "action": _("Schedule Interview"),
@@ -427,6 +434,7 @@ class CandidateCard(HorillaKanbanView):
     group_key = "stage_id"
     records_per_page = 10
     filter_keys_to_remove = ["rec_id"]
+    group_label_key = "stage"
 
     kanban_attrs = """
         hx-get='{get_details_candidate}'
@@ -439,7 +447,7 @@ class CandidateCard(HorillaKanbanView):
         "image_src": "{get_avatar}",
         "title": "{get_full_name}",
         "email": "{email}",
-        "position": "{job_position_id}",
+        "position": "{job_position_id__job_position}",
     }
 
     group_actions = [

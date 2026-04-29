@@ -38,6 +38,7 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.filters import HorillaPaginator
+from horilla.http.response import HorillaRedirect
 from horilla.settings import TIME_ZONE
 
 from .anviz import CrossChexCloudAPI
@@ -146,7 +147,7 @@ class ZKBioAttendance(Thread):
             zk_device = ZK(
                 self.machine_ip,
                 port=self.port_no,
-                timeout=5,
+                timeout=60,
                 password=self.password,
                 force_udp=False,
                 ommit_ping=False,
@@ -403,6 +404,7 @@ def biometric_device_schedule(request, device_id):
     if request.method == "POST":
         scheduler_form = BiometricDeviceSchedulerForm(request.POST)
         if scheduler_form.is_valid():
+            duration = scheduler_form.cleaned_data["scheduler_duration"]
             if device.machine_type == "zk":
                 try:
                     port_no = device.port
@@ -412,14 +414,13 @@ def biometric_device_schedule(request, device_id):
                     zk_device = ZK(
                         machine_ip,
                         port=port_no,
-                        timeout=5,
+                        timeout=60,
                         password=int(password),
                         force_udp=False,
                         ommit_ping=False,
                     )
                     conn = zk_device.connect()
                     conn.test_voice(index=0)
-                    duration = request.POST.get("scheduler_duration")
                     device = BiometricDevices.objects.get(id=device_id)
                     device.scheduler_duration = duration
                     device.is_scheduler = True
@@ -432,7 +433,7 @@ def biometric_device_schedule(request, device_id):
                         seconds=str_time_seconds(device.scheduler_duration),
                     )
                     scheduler.start()
-                    return HttpResponse("<script>window.location.reload()</script>")
+                    return HorillaRedirect(request)
                 except Exception as error:
                     logger.error("An error comes in biometric_device_schedule ", error)
                     script = """
@@ -452,7 +453,6 @@ def biometric_device_schedule(request, device_id):
                     """
                     return HttpResponse(script)
             elif device.machine_type == "anviz":
-                duration = request.POST.get("scheduler_duration")
                 device.is_scheduler = True
                 device.scheduler_duration = duration
                 device.save()
@@ -463,9 +463,8 @@ def biometric_device_schedule(request, device_id):
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
                 scheduler.start()
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
             elif device.machine_type == "dahua":
-                duration = request.POST.get("scheduler_duration")
                 device.is_scheduler = True
                 device.is_live = False
                 device.scheduler_duration = duration
@@ -477,9 +476,8 @@ def biometric_device_schedule(request, device_id):
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
                 scheduler.start()
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
             elif device.machine_type == "cosec":
-                duration = request.POST.get("scheduler_duration")
                 device.is_scheduler = True
                 device.is_live = False
                 device.scheduler_duration = duration
@@ -495,9 +493,8 @@ def biometric_device_schedule(request, device_id):
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
                 scheduler.start()
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
             elif device.machine_type == "etimeoffice":
-                duration = request.POST.get("scheduler_duration")
                 device.is_scheduler = True
                 device.is_live = False
                 device.scheduler_duration = duration
@@ -509,9 +506,9 @@ def biometric_device_schedule(request, device_id):
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
                 scheduler.start()
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
             else:
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
         context["scheduler_form"] = scheduler_form
         response = render(request, "biometric/scheduler_device_form.html", context)
@@ -1188,7 +1185,10 @@ def find_employees_in_zk(device_id):
         )
     )
     zk_device = ZK(
-        device.machine_ip, port=device.port, password=int(device.zk_password), timeout=5
+        device.machine_ip,
+        port=device.port,
+        password=int(device.zk_password),
+        timeout=60,
     )
     conn = zk_device.connect()
     zk_users = {user.user_id: user.uid for user in conn.get_users()}
@@ -1395,7 +1395,7 @@ def delete_biometric_user(request, uid, device_id):
     zk_device = ZK(
         device.machine_ip,
         port=device.port,
-        timeout=5,
+        timeout=60,
         password=int(device.zk_password),
         force_udp=False,
         ommit_ping=False,
@@ -1529,7 +1529,7 @@ def edit_cosec_user(request, user_id, device_id):
                     messages.success(
                         request, _("Biometric user data updated successfully")
                     )
-                    return HttpResponse("<script>window.location.reload()</script>")
+                    return HorillaRedirect(request)
                 if update_user.get("error"):
                     error = update_user.get("error")
                     if "validity-date-yyyy" in error:
@@ -1618,7 +1618,7 @@ def bio_users_bulk_delete(request):
         zk_device = ZK(
             device.machine_ip,
             port=device.port,
-            timeout=5,
+            timeout=60,
             password=int(device.zk_password),
             force_udp=False,
             ommit_ping=False,
@@ -1715,7 +1715,7 @@ def add_biometric_user(request, device_id):
                 zk_device = ZK(
                     device.machine_ip,
                     port=device.port,
-                    timeout=5,
+                    timeout=60,
                     password=int(device.zk_password),
                     force_udp=False,
                     ommit_ping=False,
@@ -1811,7 +1811,7 @@ def add_biometric_user(request, device_id):
             if device.machine_type == "zk":
                 conn.disable_device()
                 logger.error("An error occurred: ", str(error))
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
     return render(
         request,
         "biometric/add_biometric_user.html",
@@ -1872,13 +1872,13 @@ def add_dahua_biometric_user(request, device_id):
     if request.method == "POST":
         form = DahuaUserForm(request.POST)
         if form.is_valid():
-            employee_id = request.POST.get("employee")
-            card_no = request.POST.get("card_no")
-            user_id = request.POST.get("user_id")
-            card_status = request.POST.get("card_status")
-            card_type = request.POST.get("card_type")
-            password = request.POST.get("password")
-            valid_date_end = request.POST.get("valid_date_end")
+            employee_id = form.cleaned_data["employee"]
+            card_no = form.cleaned_data["card_no"]
+            user_id = form.cleaned_data["user_id"]
+            card_status = form.cleaned_data["card_status"]
+            card_type = form.cleaned_data["card_type"]
+            password = form.cleaned_data["password"]
+            valid_date_end = form.cleaned_data["valid_date_end"]
 
             try:
                 employee = Employee.objects.get(id=employee_id) if employee_id else None
@@ -2054,7 +2054,7 @@ def biometric_device_live(request):
                 zk_device = ZK(
                     machine_ip,
                     port=port_no,
-                    timeout=5,
+                    timeout=60,
                     password=int(password),
                     force_udp=False,
                     ommit_ping=False,
@@ -2096,6 +2096,7 @@ def biometric_device_live(request):
                       timer: 1500,
                       timerProgressBar: true, // Show a progress bar as the timer counts down
                       didClose: () => {
+                        location.reload();
                         },
                     });
                     </script>
@@ -2180,7 +2181,7 @@ def zk_biometric_attendance_logs(device_or_devices):
         zk_device = ZK(
             machine_ip,
             port=port_no,
-            timeout=5,
+            timeout=60,
             password=int(device.zk_password),
             force_udp=False,
             ommit_ping=False,

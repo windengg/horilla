@@ -49,7 +49,7 @@ urlpatterns = [
     #     name="stage-update",
     # ),
     path("stage-delete/<int:stage_id>/", views.stage_delete, name="stage-delete"),
-    # path("task-creation/", views.task_creation, name="task-creation"),
+    path("task-creation/", views.task_creation, name="task-creation"),
     path("task-delete/<int:task_id>/", views.task_delete, name="task-delete"),
     # path(
     #     "task-update/<int:task_id>/",
@@ -86,7 +86,7 @@ urlpatterns = [
     ),
     path("candidate-filter/", views.candidate_filter, name="candidate-filter"),
     path("email-send/", views.email_send, name="email-send"),
-    path("onboarding-view/", views.onboarding_view, name="onboarding-view"),
+    path("view-onboarding/", views.onboarding_view, name="onboarding-view"),
     path("kanban-view/", views.kanban_view, name="kanban-view"),
     path(
         "candidate-task-update/<int:taskId>/",
@@ -168,7 +168,7 @@ urlpatterns = [
     ),
     # path("task-report-onboarding", views.task_report, name="task-report-onboarding"),
     path(
-        "task-report-onboarding",
+        "task-report-onboarding/",
         dashboard.MyOnboardingTaskList.as_view(),
         name="task-report-onboarding",
     ),
@@ -178,7 +178,7 @@ urlpatterns = [
     #     name="candidate-tasks-status",
     # ),
     path(
-        "candidate-tasks-status",
+        "candidate-tasks-status/",
         dashboard.MyOnboardingCandidatesSingleView.as_view(),
         name="candidate-tasks-status",
     ),
@@ -232,7 +232,9 @@ urlpatterns = [
         name="onboarding-cbv-change-stage",
     ),
     path(
-        "cbv-pipeline/", pipeline.PipelineView.as_view(), name="cbv-pipeline-onboarding"
+        "onboarding-view/",
+        pipeline.PipelineView.as_view(),
+        name="cbv-pipeline-onboarding",
     ),
     path(
         "cbv-pipeline-nav/",

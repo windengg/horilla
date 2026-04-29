@@ -10,6 +10,7 @@ from django.utils.translation import gettext_lazy as _
 
 from employee.cbv.employee_profile import EmployeeProfileView
 from employee.models import Employee
+from horilla.http.response import HorillaRedirect
 from horilla_views.cbv_methods import login_required
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
@@ -436,6 +437,19 @@ class AddAssigneesFormView(HorillaFormView):
             self.form_class.verbose_name = _("Add assignees")
         return context
 
+    def dispatch(self, request, *args, **kwargs):
+        obj_id = kwargs.get("pk")
+
+        if not obj_id:
+            return HorillaRedirect(request, message=_("Objective ID is missing"))
+
+        self.object = Objective.objects.filter(pk=obj_id).first()
+
+        if not self.object:
+            return HorillaRedirect(request, message=_("Invalid Objective"))
+
+        return super().dispatch(request, *args, **kwargs)
+
     def form_valid(self, form: AddAssigneesForm) -> HttpResponse:
         if form.is_valid():
             if form.instance.pk:
@@ -536,7 +550,7 @@ class CreateEmployeeKeyResultFormView(HorillaFormView):
         ):
             return super().get(request, *args, pk=pk, **kwargs)
         messages.info(request, "You dont have permission")
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

@@ -238,6 +238,16 @@ def base64_encode(value):
 
 
 @register.filter
+def absolute_url(url, request):
+    if not url:
+        return ""
+    if url.startswith("http"):
+        return url
+
+    return request.build_absolute_uri(url)
+
+
+@register.filter
 def get_item(list, i):
     try:
         return list[i]
@@ -363,6 +373,37 @@ def get_company(context):
         else:
             return HorillaColorTheme.objects.filter(is_default=True).first()
     return HorillaColorTheme.objects.filter(is_default=True).first()
+
+
+@register.simple_tag
+def remove_item_at(obj, idx):
+    try:
+        idx = int(idx)
+    except (ValueError, TypeError):
+        return obj
+
+    # Handle dictionary
+    if isinstance(obj, dict):
+        items = list(obj.items())
+        if 0 <= idx < len(items):
+            items.pop(idx)
+        return items
+
+    # Handle list
+    if isinstance(obj, list):
+        new_list = obj.copy()
+        if 0 <= idx < len(new_list):
+            new_list.pop(idx)
+        return new_list
+
+    # Handle tuple
+    if isinstance(obj, tuple):
+        temp = list(obj)
+        if 0 <= idx < len(temp):
+            temp.pop(idx)
+        return tuple(temp)
+
+    return obj
 
 
 @register.simple_tag(takes_context=True)

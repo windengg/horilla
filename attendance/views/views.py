@@ -14,6 +14,7 @@ provide the main entry points for interacting with the application's functionali
 import logging
 import uuid
 
+from horilla.http.response import HorillaRedirect
 from horilla.methods import remove_dynamic_url
 
 logger = logging.getLogger(__name__)
@@ -35,12 +36,7 @@ from django.core.validators import validate_ipv46_address
 from django.db import transaction
 from django.db.models import ProtectedError
 from django.forms import ValidationError
-from django.http import (
-    HttpResponse,
-    HttpResponseBadRequest,
-    HttpResponseRedirect,
-    JsonResponse,
-)
+from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -174,6 +170,7 @@ def profile_attendance_tab(request):
 
 
 @login_required
+@hx_request_required
 @manager_can_enter("employee.view_employee")
 def attendance_tab(request, pk):
     """
@@ -232,12 +229,7 @@ def attendance_create(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Attendance added."))
-            response = render(
-                request, "attendance/attendance/form.html", {"form": form}
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(request, "attendance/attendance/form.html", {"form": form})
 
 
@@ -456,13 +448,7 @@ def attendance_update(request, obj_id):
             messages.success(request, _("Attendance Updated."))
             urlencode = request.GET.urlencode()
             modified_url = f"/attendance/attendance-view/?{urlencode}"
-            return HttpResponse(
-                f"""
-                    <script>
-                        window.location.reload();
-                    </script>
-                """
-            )
+            return HorillaRedirect(request)
     return render(
         request,
         "attendance/attendance/update_form.html",
@@ -497,25 +483,25 @@ def attendance_delete(request, obj_id):
                     total_overtime = attendance_overtime_seconds - total_overtime
                 overtime.overtime = format_time(total_overtime)
                 overtime.save()
-            try:
-                attendance.delete()
-                messages.success(request, _("Attendance deleted."))
-            except ProtectedError as e:
-                model_verbose_names_set = set()
-                for obj in e.protected_objects:
-                    model_verbose_names_set.add(__(obj._meta.verbose_name.capitalize()))
-                model_names_str = ", ".join(model_verbose_names_set)
-                messages.error(
-                    request,
-                    _(
-                        ("An attendance entry for {} already exists.").format(
-                            model_names_str
-                        )
-                    ),
-                )
+        try:
+            attendance.delete()
+            messages.success(request, _("Attendance deleted."))
+        except ProtectedError as e:
+            model_verbose_names_set = set()
+            for obj in e.protected_objects:
+                model_verbose_names_set.add(__(obj._meta.verbose_name.capitalize()))
+            model_names_str = ", ".join(model_verbose_names_set)
+            messages.error(
+                request,
+                _(
+                    ("An attendance entry for {} already exists.").format(
+                        model_names_str
+                    )
+                ),
+            )
     except (Attendance.DoesNotExist, OverflowError):
         messages.error(request, _("Attendance Does not exists.."))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -568,7 +554,7 @@ def attendance_bulk_delete(request):
         messages.success(request, f"{success_count} attendances deleted successfully.")
     for error in error_messages:
         messages.error(request, error)
-    return redirect("/attendance/attendance-search")
+    return JsonResponse({"message": "Success"})
 
 
 @login_required
@@ -623,12 +609,7 @@ def attendance_overtime_create(request):
         if form.is_valid():
             form.save()
             messages.success(request, _("Attendance account added."))
-            response = render(
-                request, "attendance/attendance_account/form.html", {"form": form}
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(request, "attendance/attendance_account/form.html", {"form": form})
 
 
@@ -707,14 +688,7 @@ def attendance_overtime_update(request, obj_id):
         if form.is_valid():
             form.save()
             messages.success(request, _("Attendance account updated successfully."))
-            response = render(
-                request,
-                "attendance/attendance_account/update_form.html",
-                {"form": form},
-            )
-            return HttpResponse(
-                response.content.decode("utf-8") + "<script>location.reload();</script>"
-            )
+            return HorillaRedirect(request)
     return render(
         request, "attendance/attendance_account/update_form.html", {"form": form}
     )
@@ -758,7 +732,7 @@ def attendance_overtime_delete(request, obj_id):
                     f"/attendance/attendance-overtime-individual-tab/{employee_id}/?deleted=true"
                 )
         else:
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     elif hx_target:
         return HttpResponse()
 
@@ -769,8 +743,7 @@ def attendance_account_bulk_delete(request):
     """
     This method is used to bulk delete for Payslip
     """
-    ids = request.POST["ids"]
-    ids = json.loads(ids)
+    ids = json.loads(request.POST.get("ids", "[]"))
     for id in ids:
         try:
             hour_account = AttendanceOverTime.objects.get(id=id)
@@ -792,11 +765,12 @@ def attendance_account_bulk_delete(request):
 
 
 @login_required
+@hx_request_required
 def form_shift_dynamic_data(request):
     """
     This method is used to update the shift details to the form
     """
-    shift_id = request.POST["shift_id"]
+    shift_id = request.POST.get("shift_id")
     attendance_date_str = request.POST.get("attendance_date")
     today = datetime.now()
     attendance_date = date(day=today.day, month=today.month, year=today.year)
@@ -1166,6 +1140,7 @@ def attendance_activity_export(request):
 
 
 @login_required
+@hx_request_required
 def on_time_view(request):
     """
     This method render template to view all on come early out entries
@@ -1393,6 +1368,16 @@ def validate_bulk_attendance(request):
                 continue
 
             attendance.attendance_validated = True
+            # Recalculate worked hours from attendance activities before validation
+            # to ensure Hours Account reflects actual worked time.
+            # Fixes: https://github.com/horilla/horilla-hr/issues/1055
+            if (
+                not attendance.attendance_worked_hour
+                or attendance.attendance_worked_hour == "00:00"
+            ):
+                at_work_seconds = attendance.get_at_work_from_activities()
+                if at_work_seconds > 0:
+                    attendance.attendance_worked_hour = format_time(at_work_seconds)
             attendance.save()
             validate_req_count += 1
 
@@ -1441,8 +1426,18 @@ def validate_this_attendance(request, obj_id):
         if not request.user.is_superuser:
             if attendance.employee_id.id == request.user.employee_get.id:
                 messages.error(request, _("You cannot validate your own attendance."))
-                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+                return HorillaRedirect(request)
         attendance.attendance_validated = True
+        # Recalculate worked hours from attendance activities before validation
+        # to ensure Hours Account reflects actual worked time.
+        # Fixes: https://github.com/horilla/horilla-hr/issues/1055
+        if (
+            not attendance.attendance_worked_hour
+            or attendance.attendance_worked_hour == "00:00"
+        ):
+            at_work_seconds = attendance.get_at_work_from_activities()
+            if at_work_seconds > 0:
+                attendance.attendance_worked_hour = format_time(at_work_seconds)
         attendance.save()
         urlencode = request.GET.urlencode()
         modified_url = f"/attendance/attendance-view/?{urlencode}"
@@ -1468,7 +1463,7 @@ def validate_this_attendance(request, obj_id):
     except (Attendance.DoesNotExist, ValueError):
         messages.error(request, _("Attendance not found"))
 
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1479,7 +1474,12 @@ def revalidate_this_attendance(request, obj_id):
         id  : attendance id
     """
 
-    attendance = Attendance.objects.get(id=obj_id)
+    attendance = Attendance.find(obj_id)
+    if not attendance:
+        return HorillaRedirect(
+            request, message=_("No Attendance found matching the query.")
+        )
+
     if is_reportingmanger(request, attendance) or request.user.has_perm(
         "attendance.change_attendance"
     ):
@@ -1504,7 +1504,7 @@ def revalidate_this_attendance(request, obj_id):
                 redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
                 icon="refresh",
             )
-        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        return HorillaRedirect(request)
     return HttpResponse("You Cannot Request for others attendance")
 
 
@@ -1521,7 +1521,7 @@ def approve_overtime(request, obj_id):
         if not request.user.is_superuser:
             if attendance.employee_id.id == request.user.employee_get.id:
                 messages.error(request, _("You cannot approve your own overtime."))
-                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+                return HorillaRedirect(request)
         attendance.attendance_overtime_approve = True
         attendance.save()
         urlencode = request.GET.urlencode()
@@ -1549,7 +1549,7 @@ def approve_overtime(request, obj_id):
             )
     except (Attendance.DoesNotExist, OverflowError):
         messages.error(request, _("Attendance not found"))
-    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1558,8 +1558,7 @@ def approve_bulk_overtime(request):
     """
     This method is used to approve bulk of attendance
     """
-    ids = request.POST["ids"]
-    ids = json.loads(ids)
+    ids = json.loads(request.POST.get("ids", "[]"))
     otapprove_ids = []
     filtered_ids = []
     for attendance_id in ids:
@@ -1602,6 +1601,7 @@ def approve_bulk_overtime(request):
 
 
 @login_required
+@hx_request_required
 # @manager_can_enter("attendance.change_attendance")
 def attendance_add_to_batch(request):
     """
@@ -1624,12 +1624,12 @@ def attendance_add_to_batch(request):
                 except Exception as e:
                     logger.error(e)
                     messages.error(request, _("Something went wrong."))
-                    return HttpResponse("<script>window.location.reload()</script>")
+                    return HorillaRedirect(request)
             messages.success(request, _(f"Attendances added to {batch}."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
         else:
             messages.error(request, _("Something went wrong."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "attendance/attendance/attendance_add_batch.html",
@@ -1817,13 +1817,20 @@ def update_worked_hour_field(request):
 
 
 @login_required
+@hx_request_required
 def form_date_checking(request):
-    attendance_date_str = request.POST["attendance_date"]
     minimum_hour = "00:00"
+    attendance_date_str = request.POST.get("attendance_date")
+    if not attendance_date_str:
+        return JsonResponse(
+            {
+                "minimum_hour": minimum_hour,
+            }
+        )
     # Converting to date type.
     attendance_date = datetime.strptime(attendance_date_str, "%Y-%m-%d").date()
 
-    if request.POST["shift_id"]:
+    if request.POST.get("shift_id"):
         shift_id = request.POST["shift_id"]
         day = attendance_date.strftime("%A").lower()
         schedule_today = EmployeeShiftSchedule.objects.filter(
@@ -1855,7 +1862,11 @@ def user_request_one_view(request, id):
     Returns:
     GET : return one user attendance request view template
     """
-    attendance_request = Attendance.objects.get(id=id)
+    attendance_request = Attendance.find(id)
+    if not attendance_request:
+        return HorillaRedirect(
+            request, message=_("No Attendance found matching the query.")
+        )
 
     at_work_seconds = attendance_request.at_work_second
     hours_at_work = at_work_seconds // 3600
@@ -1896,6 +1907,7 @@ def get_attendance_activities(request, obj_id):
 
 
 @login_required
+@hx_request_required
 def hour_attendance_select(request):
     page_number = request.GET.get("page")
     context = {}
@@ -1919,6 +1931,7 @@ def hour_attendance_select(request):
 
 
 @login_required
+@hx_request_required
 def hour_attendance_select_filter(request):
     page_number = request.GET.get("page")
     filtered = request.GET.get("filter")
@@ -1953,6 +1966,7 @@ def hour_attendance_select_filter(request):
 
 
 @login_required
+@hx_request_required
 def activity_attendance_select(request):
     page_number = request.GET.get("page")
     activity = AttendanceActivity.objects.all()
@@ -1976,6 +1990,7 @@ def activity_attendance_select(request):
 
 
 @login_required
+@hx_request_required
 def activity_attendance_select_filter(request):
     page_number = request.GET.get("page")
     filtered = request.GET.get("filter")
@@ -2010,6 +2025,7 @@ def activity_attendance_select_filter(request):
 
 
 @login_required
+@hx_request_required
 def latecome_attendance_select(request):
     page_number = request.GET.get("page")
     late_objs = AttendanceLateComeEarlyOut.objects.none()
@@ -2033,6 +2049,7 @@ def latecome_attendance_select(request):
 
 
 @login_required
+@hx_request_required
 def latecome_attendance_select_filter(request):
     page_number = request.GET.get("page")
     filtered = request.GET.get("filter")
@@ -2091,7 +2108,7 @@ def create_grace_time(request):
                 shift.grace_time_id = gracetime
                 shift.save()
             messages.success(request, _("Grace time created successfully."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     return render(
         request,
         "attendance/grace_time/grace_time_form.html",
@@ -2116,7 +2133,7 @@ def assign_shift(request, grace_id):
                     shift.grace_time_id = gracetime
                     shift.save()
                 messages.success(request, _("Grace time added to shifts successfully."))
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
         return render(
             request,
             "attendance/grace_time/assign_shift.html",
@@ -2145,7 +2162,7 @@ def update_grace_time(request, grace_id):
             instance = form.save(commit=False)
             instance.save()
             messages.success(request, _("Grace time updated successfully."))
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     context = {
         "form": form,
         "grace_id": grace_id,
@@ -2178,7 +2195,7 @@ def delete_grace_time(request, grace_id):
     except GraceTime.DoesNotExist:
         delete_error = True
         messages.error(request, _("Grace Time Does not exists.."))
-        return HttpResponse("<script>window.location.reload()</script>")
+        return HorillaRedirect(request)
     except ProtectedError:
         delete_error = True
         messages.error(request, _("Related datas exists."))
@@ -2198,6 +2215,7 @@ def delete_grace_time(request, grace_id):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.update_gracetime")
 def update_isactive_gracetime(request):
     """
@@ -2208,7 +2226,13 @@ def update_isactive_gracetime(request):
     """
     isChecked = request.POST.get("isChecked")
     gracetimeId = request.POST.get("gracetimeId")
+    if not gracetimeId:
+        return JsonResponse({"type": "error", "message": "GraceTime ID missing"})
+
     gracetime = GraceTime.objects.get(id=gracetimeId)
+    if not gracetime:
+        return JsonResponse({"type": "error", "message": "GraceTime not found"})
+
     if isChecked == "true":
         gracetime.is_active = True
         response = {
@@ -2226,6 +2250,7 @@ def update_isactive_gracetime(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.update_gracetime")
 def update_gracetime_clock_in_clock_out(request):
     """
@@ -2234,32 +2259,38 @@ def update_gracetime_clock_in_clock_out(request):
     - isChecked: Boolean value representing the state of grace time,
     - gracetimeId: Id of PayslipAutoGenerate object
     """
-    isChecked = request.POST.get("isChecked")
     gracetimeId = request.POST.get("gracetimeId")
+    if not gracetimeId:
+        return JsonResponse({"type": "error", "message": "GraceTime ID missing"})
+
+    isChecked = request.POST.get("isChecked")
     update = request.POST.get("update")
-    garcetime = GraceTime.objects.get(id=gracetimeId)
+    gracetime = GraceTime.objects.get(id=gracetimeId)
+    if not gracetime:
+        return JsonResponse({"type": "error", "message": "GraceTime not found"})
+
     if update == "clock_in":
         if isChecked == "true":
-            garcetime.allowed_clock_in = True
+            gracetime.allowed_clock_in = True
             response = {
                 "type": "success",
                 "message": _("Gracetime applicable on clock-In successfully."),
             }
         else:
-            garcetime.allowed_clock_in = False
+            gracetime.allowed_clock_in = False
             response = {
                 "type": "success",
                 "message": _("Gracetime unapplicable on clock-In  successfully."),
             }
     elif update == "clock_out":
         if isChecked == "true":
-            garcetime.allowed_clock_out = True
+            gracetime.allowed_clock_out = True
             response = {
                 "type": "success",
                 "message": _("Gracetime applicable on clock-out successfully."),
             }
         else:
-            garcetime.allowed_clock_out = False
+            gracetime.allowed_clock_out = False
             response = {
                 "type": "success",
                 "message": _("Gracetime unapplicable on clock-out successfully."),
@@ -2269,11 +2300,12 @@ def update_gracetime_clock_in_clock_out(request):
             "type": "error",
             "message": _("Something went wrong ."),
         }
-    garcetime.save()
+    gracetime.save()
     return JsonResponse(response)
 
 
 @login_required
+@hx_request_required
 def create_attendancerequest_comment(request, attendance_id):
     """
     This method renders form and template to create Attendance request comments
@@ -2394,6 +2426,7 @@ def create_attendancerequest_comment(request, attendance_id):
 
 
 @login_required
+@hx_request_required
 def view_attendancerequest_comment(request, attendance_id):
     """
     This method is used to show Attendance request comments
@@ -2425,18 +2458,25 @@ def view_attendancerequest_comment(request, attendance_id):
 
 
 @login_required
+@hx_request_required
 def delete_attendancerequest_comment(request, comment_id):
     """
     This method is used to delete Attendance request comments
     """
+    comment = AttendanceRequestComment.find(comment_id)
+    if not comment:
+        return HorillaRedirect(
+            request, message=_("No Comment found matching the query.")
+        )
+
     script = ""
-    comment = AttendanceRequestComment.objects.get(id=comment_id)
     comment.delete()
     messages.success(request, _("Comment deleted successfully!"))
     return HttpResponse(script)
 
 
 @login_required
+@hx_request_required
 def delete_comment_file(request):
     """
     Used to delete attachment
@@ -2754,7 +2794,6 @@ def work_record_export(request):
 
 
 @login_required
-@hx_request_required
 @permission_required("attendance.add_attendancegeneralsetting")
 def enable_timerunner(request):
     """
@@ -2798,7 +2837,7 @@ def enable_disable_tracking_late_come_early_out(request):
         messages.success(
             request, _("Tracking late come early out {} successfully").format(message)
         )
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -2878,6 +2917,7 @@ def validation_condition_view(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.add_attendancevalidationcondition")
 def validation_condition_create(request):
     """
@@ -2948,12 +2988,12 @@ def enable_ip_restriction(request):
 
         if not ip_restiction:
             ip_restiction = AttendanceAllowedIP.objects.create(is_enabled=True)
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
 
         ip_restiction.is_enabled = not ip_restiction.is_enabled
 
         ip_restiction.save()
-    return HttpResponse("<script>window.location.reload()</script>")
+    return HorillaRedirect(request)
 
 
 def validate_ip_address(self, value):
@@ -2971,6 +3011,7 @@ def validate_ip_address(self, value):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.add_attendance")
 def create_allowed_ips(request):
     """
@@ -3011,7 +3052,7 @@ def create_allowed_ips(request):
                 )
                 messages.success(request, "IP addresses saved successfully")
 
-            return HttpResponse("<script>window.location.reload()</script>")
+            return HorillaRedirect(request)
     else:
         form = AttendanceAllowedIPForm()
 
@@ -3080,7 +3121,7 @@ def edit_allowed_ips(request):
                     allowed_ips.additional_data["allowed_ips"] = list(existing_ips)
                     allowed_ips.save()
                     messages.success(request, "IP address updated successfully")
-                return HttpResponse("<script>window.location.reload()</script>")
+                return HorillaRedirect(request)
 
     except (ValueError, IndexError):
         messages.error(request, "Invalid ID provided.")
