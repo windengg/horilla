@@ -10,15 +10,17 @@ on:
         default: ''
 
   push:
-    branches: [ 1.0 ]
+    branches: [ "1.0" ]
     paths-ignore:
       - "README.md"
       - ".github/**"
+
   pull_request_target:
     branches: [ main ]
     paths-ignore:
       - "README.md"
       - ".github/**"
+
   schedule:
     - cron: "00 07 * * TUE"
 
@@ -48,6 +50,19 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}      # This makes it build from the selected branch
+          fetch-depth: 0
+
+      - name: Show build context
+        run: |
+          echo "========================================"
+          echo "Event          : ${{ github.event_name }}"
+          echo "Branch         : ${{ github.ref_name }}"
+          echo "Ref            : ${{ github.ref }}"
+          echo "Commit SHA     : ${{ github.sha }}"
+          echo "Custom tag     : ${{ inputs.tag }}"
+          echo "========================================"
 
       - name: Set short SHA
         id: vars
@@ -113,6 +128,13 @@ jobs:
       packages: write
 
     steps:
+      - name: Show manifest context
+        run: |
+          echo "========================================"
+          echo "Creating multi-arch manifest for branch: ${{ github.ref_name }}"
+          echo "Custom tag: ${{ inputs.tag }}"
+          echo "========================================"
+
       - name: Set short SHA
         id: vars
         run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-6)" >> $GITHUB_OUTPUT
