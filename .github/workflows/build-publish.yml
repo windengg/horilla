@@ -114,10 +114,9 @@ jobs:
             ${{ steps.tag_logic.outputs.include_latest == 'true' && format('{0}:latest-{1}', env.GHCR_BASE_NAME, matrix.suffix) || '' }}
             ${{ steps.tag_logic.outputs.include_sha == 'true' && format('{0}:{1}-{2}', env.GHCR_BASE_NAME, steps.vars.outputs.short_sha, matrix.suffix) || '' }}
             ${{ (steps.tag_logic.outputs.use_custom_only == 'true' || inputs.tag != '') && format('{0}:{1}-{2}', env.GHCR_BASE_NAME, inputs.tag, matrix.suffix) || '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
+          no-cache: true
+          provenance: false
+          sbom: false
 
   combine:
     name: Create Multi-Arch Manifest
