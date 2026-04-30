@@ -130,26 +130,9 @@ jobs:
       - name: Show manifest context
         run: |
           echo "========================================"
-          echo "Creating multi-arch manifest for branch: ${{ github.ref_name }}"
-          echo "Custom tag: ${{ inputs.tag }}"
+          echo "Creating multi-arch manifest for branch : ${{ github.ref_name }}"
+          echo "Custom tag                              : ${{ inputs.tag }}"
           echo "========================================"
-
-      - name: Set short SHA
-        id: vars
-        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-6)" >> $GITHUB_OUTPUT
-
-      - name: Determine tagging strategy (manifest)
-        id: tag_logic
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            echo "use_custom_only=true" >> $GITHUB_OUTPUT
-            echo "include_latest=false" >> $GITHUB_OUTPUT
-            echo "include_sha=false" >> $GITHUB_OUTPUT
-          else
-            echo "use_custom_only=false" >> $GITHUB_OUTPUT
-            echo "include_latest=true" >> $GITHUB_OUTPUT
-            echo "include_sha=true" >> $GITHUB_OUTPUT
-          fi
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -166,34 +149,30 @@ jobs:
 
       - name: Create and push multi-arch manifest (Docker Hub)
         run: |
-          TAGS=""
-          if [ "${{ steps.tag_logic.outputs.include_latest }}" = "true" ]; then
-            TAGS="$TAGS --tag ${{ env.IMAGE_BASE_NAME }}:latest"
-          fi
-          if [ "${{ steps.tag_logic.outputs.include_sha }}" = "true" ]; then
-            TAGS="$TAGS --tag ${{ env.IMAGE_BASE_NAME }}:${{ steps.vars.outputs.short_sha }}"
-          fi
           if [ -n "${{ inputs.tag }}" ]; then
-            TAGS="$TAGS --tag ${{ env.IMAGE_BASE_NAME }}:${{ inputs.tag }}"
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="latest"
           fi
 
-          docker buildx imagetools create $TAGS \
-            ${{ env.IMAGE_BASE_NAME }}:latest-amd64 \
-            ${{ env.IMAGE_BASE_NAME }}:latest-arm64
+          echo "Creating manifest for tag: $TAG"
+
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE_BASE_NAME }}:$TAG \
+            ${{ env.IMAGE_BASE_NAME }}:${TAG}-amd64 \
+            ${{ env.IMAGE_BASE_NAME }}:${TAG}-arm64
 
       - name: Create and push multi-arch manifest (GHCR)
         run: |
-          TAGS=""
-          if [ "${{ steps.tag_logic.outputs.include_latest }}" = "true" ]; then
-            TAGS="$TAGS --tag ${{ env.GHCR_BASE_NAME }}:latest"
-          fi
-          if [ "${{ steps.tag_logic.outputs.include_sha }}" = "true" ]; then
-            TAGS="$TAGS --tag ${{ env.GHCR_BASE_NAME }}:${{ steps.vars.outputs.short_sha }}"
-          fi
           if [ -n "${{ inputs.tag }}" ]; then
-            TAGS="$TAGS --tag ${{ env.GHCR_BASE_NAME }}:${{ inputs.tag }}"
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="latest"
           fi
 
-          docker buildx imagetools create $TAGS \
-            ${{ env.GHCR_BASE_NAME }}:latest-amd64 \
-            ${{ env.GHCR_BASE_NAME }}:latest-arm64
+          echo "Creating manifest for tag: $TAG"
+
+          docker buildx imagetools create \
+            -t ${{ env.GHCR_BASE_NAME }}:$TAG \
+            ${{ env.GHCR_BASE_NAME }}:${TAG}-amd64 \
+            ${{ env.GHCR_BASE_NAME }}:${TAG}-arm64
