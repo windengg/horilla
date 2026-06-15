@@ -15,6 +15,8 @@ from django.core.files.storage import FileSystemStorage
 # BASE PATH & ENVIRONMENT CONFIGURATION
 # ========================================
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# settings.py
+import os
 
 env = environ.Env(
     DEBUG=(bool, True),
@@ -43,6 +45,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.sites",
     # Third-party apps
     "notifications",
     "mathfilters",
@@ -84,6 +87,7 @@ INSTALLED_APPS = [
     "report",
     "whatsapp",
     "horilla_ldap",
+    "horilla_dbtemplate",
 ]
 
 # ========================================
@@ -96,11 +100,14 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
     "PAGE_SIZE": 20,
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=30),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
 }
 
 SWAGGER_SETTINGS = {
@@ -222,6 +229,7 @@ TEMPLATES = [
                 "horilla_crumbs.context_processors.breadcrumbs",
             ],
             "loaders": [
+                "horilla_dbtemplate.loaders.Loader",
                 (
                     "django.template.loaders.filesystem.Loader",
                     [BASE_DIR / THEME_APP / "templates"],
@@ -304,7 +312,10 @@ SIDEBARS = [
     "report",
 ]
 
-AUDITLOG_INCLUDE_ALL_MODELS = True
+# Audit logging is opt-in: the horilla_audit app registers models explicitly
+# through its registry, driven by AuditModelConfig and a default whitelist
+# (Employee, EmployeeWorkInformation, EmployeeBankDetails).
+AUDITLOG_INCLUDE_ALL_MODELS = False
 AUDITLOG_EXCLUDE_TRACKING_MODELS = (
     # "<app_name>",
     # "<app_name>.<model>"
@@ -420,9 +431,9 @@ APPS = [
 # ========================================
 # LDAP CONFIGURATION (Default)
 # ========================================
-AUTH_LDAP_SERVER_URI = "ldap://127.0.0.1:389"
-AUTH_LDAP_BIND_DN = "cn=admin,dc=horilla,dc=com"
-AUTH_LDAP_BIND_PASSWORD = "your_password"
+AUTH_LDAP_SERVER_URI = env("AUTH_LDAP_SERVER_URI", default="ldap://127.0.0.1:389")
+AUTH_LDAP_BIND_DN = env("AUTH_LDAP_BIND_DN", default="cn=admin,dc=horilla,dc=com")
+AUTH_LDAP_BIND_PASSWORD = env("AUTH_LDAP_BIND_PASSWORD", default="")
 
 AUTH_LDAP_USER_ATTR_MAP = {
     "first_name": "givenName",
@@ -434,7 +445,7 @@ AUTH_LDAP_USER_ATTR_MAP = {
 DEFAULT_LDAP_CONFIG = {
     "LDAP_SERVER": env("LDAP_SERVER", default="ldap://127.0.0.1:389"),
     "BIND_DN": env("BIND_DN", default="cn=admin,dc=horilla,dc=com"),
-    "BIND_PASSWORD": env("BIND_PASSWORD", default="horilla"),
+    "BIND_PASSWORD": env("BIND_PASSWORD", default=""),
     "BASE_DN": env("BASE_DN", default="ou=users,dc=horilla,dc=com"),
 }
 

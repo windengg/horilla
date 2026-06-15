@@ -33,7 +33,6 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods, require_POST
 
 from base.backends import ConfiguredEmailBackend
@@ -190,6 +189,26 @@ def stage_update(request, stage_id, recruitment_id):
                 icon="people-circle",
                 redirect=reverse("onboarding-view"),
             )
+            if request.META.get("HTTP_HX_REQUEST") == "true":
+                return HttpResponse(
+                    """
+                    <script>
+                      (function () {
+                        const activeTab = document.querySelector(".oh-tabs__tab--active");
+                        const target = activeTab ? activeTab.getAttribute("data-target") : null;
+                        if (target && window.htmx) {
+                          htmx.ajax("GET", window.location.href, {
+                            target: target,
+                            swap: "outerHTML",
+                            select: target
+                          });
+                        }
+                        $("#reloadMessagesButton").click();
+                        $("#genericModal").removeClass("oh-modal--show");
+                      })();
+                    </script>
+                    """
+                )
             return HorillaRedirect(request)
     return render(
         request,
@@ -486,6 +505,8 @@ def candidate_delete(request, obj_id):
                 )
             ),
         )
+    if request.META.get("HTTP_HX_REQUEST"):
+        return HttpResponse(status=204)
     return redirect(reverse("candidates-view"))
 
 
@@ -898,9 +919,11 @@ def email_send(request):
             messages.error(request, f"Mail not sent to {candidate.name}")
             # continue
 
-        # Mark onboarding started
+        # Mark onboarding started without triggering Candidate.save() validation
+        # (which can fail with "Choose valid choice" on job_position_id when the
+        # candidate's job position has been removed from recruitment.open_positions).
+        Candidate.objects.filter(pk=candidate.pk).update(start_onboard=True)
         candidate.start_onboard = True
-        candidate.save()
 
         # ✅ SAFE onboarding stage insert
         try:
@@ -1096,7 +1119,6 @@ def kanban_view(request):
 portal_user = {}
 
 
-@hx_request_required
 def user_creation(request, token):
     """
     function used to create user account in onboarding portal.
@@ -1219,29 +1241,58 @@ def employee_creation(request, token):
         "dob": candidate.dob,
     }
     session_key = request.session.session_key
-    user = portal_user[session_key]
-    if Employee.objects.filter(email=user).exists():
+    user = portal_user.get(session_key)
+    if user is None:
+        # Fallback for direct/opened links where in-memory portal state is absent.
+        user = HorillaUser.objects.filter(username=candidate.email).first()
+    elif not getattr(user, "pk", None):
+        # Related filters require a saved instance; resolve persisted user by email/username.
+        user = HorillaUser.objects.filter(username=candidate.email).first() or user
+
+    if user is None:
+        messages.error(
+            request,
+            _("Please create your account first before continuing employee creation."),
+        )
+        return redirect("user-creation", token)
+
+    user_email = getattr(user, "email", None) or candidate.email
+    if Employee.objects.filter(email=user_email).exists():
         messages.success(request, _("Employee with email id already exists."))
         return redirect("login/")
-    if Employee.objects.filter(employee_user_id=user).first() is not None:
-        employee = Employee.objects.filter(employee_user_id=user).first()
+    employee_qs = (
+        Employee.objects.filter(employee_user_id=user)
+        if getattr(user, "pk", None)
+        else Employee.objects.none()
+    )
+    if employee_qs.first() is not None:
+        employee = employee_qs.first()
         if employee.employee_bank_details:
             messages.success(request, _("Employee already exists.."))
             return redirect("login/")
-        initial = Employee.objects.filter(employee_user_id=user).first().__dict__
+        initial = employee.__dict__
 
     form = EmployeeCreationForm(
         initial=initial,
     )
     # form.errors.clear()
     if request.method == "POST":
-        instance = Employee.objects.filter(employee_user_id=user).first()
+        instance = employee_qs.first() if getattr(user, "pk", None) else None
         form = EmployeeCreationForm(
             request.POST,
             instance=instance,
         )
         if form.is_valid():
-            user.save()
+            if user is None:
+                messages.error(
+                    request,
+                    _(
+                        "User account was not found. Please complete account creation and try again."
+                    ),
+                )
+                return redirect("user-creation", token)
+            if not getattr(user, "pk", None):
+                user.save()
             login(request, user)
             employee_personal_info = form.save(commit=False)
             employee_personal_info.employee_user_id = user
@@ -1665,7 +1716,6 @@ def onboard_candidate_chart(request):
 
 @login_required
 @permission_required("candidate.change_candidate")
-@csrf_exempt
 @require_POST
 def update_joining(request):
     """
@@ -1875,7 +1925,6 @@ def onboarding_send_mail(request, candidate_id):
 
 @login_required
 @stage_manager_can_enter("recruitment.change_stage")
-@csrf_exempt
 @require_POST
 def update_probation_end(request):
     """
@@ -2037,6 +2086,35 @@ def add_to_rejected_candidates(request):
 
 
 @login_required
+@permission_required("recruitment.change_candidate")
+@require_http_methods(["POST"])
+def undo_rejected_candidate(request, candidate_id):
+    """
+    Remove candidate from rejected list.
+    """
+    deleted_count, __ = RejectedCandidate.objects.filter(
+        candidate_id=candidate_id
+    ).delete()
+    if deleted_count:
+        messages.success(request, _("Candidate removed from rejected list"))
+    else:
+        messages.info(request, _("Candidate is not in rejected list"))
+
+    if request.META.get("HTTP_HX_REQUEST") == "true":
+        response = HttpResponse(
+            "<script>"
+            "$('#applyFilter').click();"
+            "$('#reloadMessagesButton').click();"
+            "</script>"
+        )
+        # Also trigger via HX-Trigger header so listeners (#applyFilter / #reloadMessagesButton)
+        # fire even when the button uses hx-swap="none" (which discards the response body).
+        response["HX-Trigger"] = "reloadCandidatesList"
+        return response
+    return HorillaRedirect(request)
+
+
+@login_required
 @hx_request_required
 def candidate_select(request):
     """
@@ -2094,6 +2172,8 @@ def candidate_select_filter(request):
         )
 
 
+@login_required
+@permission_required("recruitment.change_candidate")
 def offer_letter_bulk_status_update(request):
     """
     This function is used to bulk update the offerletter status
@@ -2121,6 +2201,8 @@ def offer_letter_bulk_status_update(request):
     return JsonResponse("success", safe=False)
 
 
+@login_required
+@permission_required("recruitment.delete_candidate")
 def onboarding_candidate_bulk_delete(request):
     """
     This function is used to bulk delete onboarding candidates

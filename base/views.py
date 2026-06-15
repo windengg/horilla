@@ -21,6 +21,7 @@ from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group, Permission
 from django.contrib.auth.views import PasswordResetConfirmView, PasswordResetView
 from django.core.exceptions import ValidationError
@@ -36,12 +37,12 @@ from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils._os import safe_join
 from django.utils.decorators import method_decorator
-from django.utils.html import strip_tags
+from django.utils.html import format_html, strip_tags
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext as _
 from django.views import View
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from django.views.generic import TemplateView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import UntypedToken
@@ -182,6 +183,7 @@ from horilla.decorators import (
 )
 from horilla.group_by import group_by_queryset
 from horilla.http.response import HorillaRedirect
+from horilla.menu import get_settings_menu
 from horilla.methods import get_horilla_model_class, remove_dynamic_url
 from horilla_audit.forms import HistoryTrackingFieldsForm
 from horilla_audit.models import AccountBlockUnblock, AuditTag, HistoryTrackingFields
@@ -261,10 +263,50 @@ def initialize_database_condition():
     return init_database
 
 
+def _shift_fixture_dates(file_path):
+    """
+    Return a date-shifted version of a JSON fixture as a string.
+
+    All dates between 2020-01-01 and 2030-12-31 are shifted so that the
+    fixture's anchor date (2025-07-01) maps to today. Static dates outside
+    that window (e.g. DOBs in the 1960s) are left untouched. Returns None
+    if no shift is needed (delta == 0).
+    """
+    import re
+
+    ANCHOR = datetime(2025, 7, 1).date()
+    today = datetime.today().date()
+    target = today
+    delta = (target - ANCHOR).days
+
+    if delta == 0:
+        return None
+
+    DATE_RE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+    SHIFT_MIN = datetime(2020, 1, 1).date()
+    SHIFT_MAX = datetime(2030, 12, 31).date()
+
+    def _shift(match):
+        try:
+            d = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            if SHIFT_MIN <= d <= SHIFT_MAX:
+                return (d + timedelta(days=delta)).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+        return match.group(1)
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    return DATE_RE.sub(_shift, content)
+
+
 def load_demo_database(request):
     if initialize_database_condition():
         if request.method == "POST":
             if request.POST.get("load_data_password") == settings.DB_INIT_PASSWORD:
+                import tempfile
+
                 data_files = [
                     "user_data.json",
                     "employee_info_data.json",
@@ -289,13 +331,30 @@ def load_demo_database(request):
                     file for app, file in optional_apps if apps.is_installed(app)
                 ]
 
-                # Load all data files
+                # Load all data files, shifting dates relative to today
                 for file in data_files:
                     file_path = path.join(settings.BASE_DIR, "load_data", file)
+                    tmp = None
                     try:
-                        call_command("loaddata", file_path)
+                        shifted = _shift_fixture_dates(file_path)
+                        if shifted is not None:
+                            suffix = path.splitext(file)[1]
+                            with tempfile.NamedTemporaryFile(
+                                mode="w",
+                                suffix=suffix,
+                                delete=False,
+                                encoding="utf-8",
+                            ) as tmp_f:
+                                tmp_f.write(shifted)
+                                tmp = tmp_f.name
+                            call_command("loaddata", tmp)
+                        else:
+                            call_command("loaddata", file_path)
                     except Exception as e:
                         messages.error(request, f"An error occured : {e}")
+                    finally:
+                        if tmp and path.exists(tmp):
+                            os.remove(tmp)
 
                 messages.success(request, _("Database loaded successfully."))
             else:
@@ -314,6 +373,8 @@ def initialize_database(request):
     Returns:
         HttpResponse: The rendered HTML template or a redirect response.
     """
+    if not settings.DEBUG:
+        raise Http404
     if initialize_database_condition():
         if request.method == "POST":
             password = request._post.get("password")
@@ -707,10 +768,7 @@ class HorillaPasswordResetView(PasswordResetView):
                 )
                 return HorillaRedirect(self.request)
 
-            return redirect(reverse_lazy("reset-send-success"))
-
-        messages.info(self.request, _("No user found with the username"))
-        return redirect("forgot-password")
+        return redirect(reverse_lazy("reset-send-success"))
 
 
 class EmployeePasswordResetView(PasswordResetView):
@@ -747,11 +805,10 @@ class EmployeePasswordResetView(PasswordResetView):
                     "extra_email_context": self.extra_email_context,
                 }
                 form.save(**opts)
-                messages.success(
-                    self.request, _("Password reset link sent successfully")
-                )
-            else:
-                messages.error(self.request, _("No user with the given username"))
+            messages.success(
+                self.request,
+                _("If your account exists, a password reset link has been sent"),
+            )
             return HorillaRedirect(self.request)
 
         except Exception as e:
@@ -961,57 +1018,9 @@ class Workinfo:
 @login_required
 def home(request):
     """
-    This method is used to render index page
+    This method is used to render index page — redirects to the modern dashboard.
     """
-
-    today = datetime.today()
-    today_weekday = today.weekday()
-    first_day_of_week = today - timedelta(days=today_weekday)
-    last_day_of_week = first_day_of_week + timedelta(days=6)
-
-    employee_charts = DashboardEmployeeCharts.objects.get_or_create(
-        employee=request.user.employee_get
-    )[0]
-
-    user = request.user
-    today = timezone.now().date()  # Get today's date
-    is_birthday = None
-
-    if user.employee_get.dob != None:
-        is_birthday = (
-            user.employee_get.dob.month == today.month
-            and user.employee_get.dob.day == today.day
-        )
-
-    # show_section = any(
-    #     [
-    #         request.user.has_perm("attendance.view_attendancevalidationcondition"),
-    #         request.user.has_perm("helpdesk.view_departmentmanager"),
-    #         request.user.has_perm("helpdesk.view_tickettype"),
-    #         request.user.has_perm("employee.view_employeetag"),
-    #         request.user.has_perm("pms.add_bonuspointsetting"),
-    #         request.user.has_perm("payroll.view_payslipautogenerate"),
-    #         request.user.has_perm("leave.add_restrictleave"),
-    #         request.user.has_perm("base.view_biometricattendance"),
-    #         request.user.has_perm("attendance.add_attendance"),
-    #         request.user.has_perm("geofencing.add_geofencing"),
-    #         request.user.has_perm("facedetection.add_facedetection"),
-    #         request.user.has_perm("recruitment.view_recruitment"),
-    #         request.user.has_perm("recruitment.view_rejectreason"),
-    #         request.user.has_perm("recruitment.add_recruitment"),
-    #         request.user.has_perm("recruitment.add_linkedinaccount"),
-    #     ]
-    # )
-
-    context = {
-        "first_day_of_week": first_day_of_week.strftime("%Y-%m-%d"),
-        "last_day_of_week": last_day_of_week.strftime("%Y-%m-%d"),
-        "charts": employee_charts.charts,
-        "is_birthday": is_birthday,
-        # "show_section": show_section,
-    }
-
-    return render(request, "index.html", context)
+    return redirect("dashboard")
 
 
 @login_required
@@ -1097,6 +1106,15 @@ def common_settings(request):
     This method is used to render setting page template
     """
     return render(request, "settings.html")
+
+
+class SettingsView(LoginRequiredMixin, TemplateView):
+    """
+    Settings page — builds the sidebar menu from registered app menu.py
+    entries and passes it directly into the template context.
+    """
+
+    template_name = "settings.html"
 
 
 @login_required
@@ -1402,6 +1420,32 @@ def object_delete(request, obj_id, **kwargs):
             return redirect(redirect_path)
         else:
             return HorillaRedirect(request)
+
+    if (
+        redirect_path
+        and request.headers.get("HX-Request") == "true"
+        and redirect_path.startswith("/employee/document-request-view")
+    ):
+        referer = request.META.get("HTTP_REFERER", "")
+        if "/employee/document-request-view" in referer:
+            qs = urlparse(referer).query
+            filter_url = reverse("document-request-filter-view")
+            if qs:
+                filter_url = f"{filter_url}?{qs}"
+            inner = format_html(
+                '<span hx-get="{}" hx-target="#view-container" hx-swap="innerHTML" '
+                'hx-trigger="load"></span>',
+                filter_url,
+            )
+            script = (
+                "<script>"
+                "document.querySelectorAll('.oh-modal--show').forEach(function (m) {"
+                "m.classList.remove('oh-modal--show');"
+                "});"
+                "document.getElementById('reloadMessagesButton')?.click();"
+                "</script>"
+            )
+            return HttpResponse(str(inner) + script)
 
     if redirect_path:
         previous_data = request.GET.urlencode()
@@ -2121,14 +2165,18 @@ def work_type_create(request):
     This method is used to create work type
     """
     dynamic = request.GET.get("dynamic")
-    form = WorkTypeForm()
+    selected_company = request.session.get("selected_company")
+    company = None
+    if selected_company and selected_company != "all":
+        company = Company.objects.filter(id=selected_company).first()
+    initial = {"company_id": [company] if company else []}
+    form = WorkTypeForm(initial=initial)
     work_types = WorkType.objects.all()
     if request.method == "POST":
         form = WorkTypeForm(request.POST)
         if form.is_valid():
             form.save()
-            form = WorkTypeForm()
-
+            form = WorkTypeForm(initial=initial)
             messages.success(request, _("Work Type has been created successfully!"))
             return HorillaRedirect(request)
 
@@ -2145,8 +2193,10 @@ def work_type_view(request):
     """
     This method is used to view work type
     """
-
+    selected_company = request.session.get("selected_company")
     work_types = WorkType.objects.all()
+    if selected_company and selected_company != "all":
+        work_types = work_types.filter(company_id__id=selected_company)
     return render(
         request,
         "base/work_type/work_type.html",
@@ -3989,10 +4039,11 @@ def work_type_request_cancel(request, id):
         id  : work type request id
 
     """
+    is_ajax = request.META.get("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest"
     work_type_request = WorkTypeRequest.find(id)
     if not work_type_request:
         messages.error(request, _("Work type request not found."))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
 
     if not (
         is_reportingmanger(request, work_type_request)
@@ -4001,7 +4052,7 @@ def work_type_request_cancel(request, id):
         and work_type_request.approved == False
     ):
         messages.error(request, _("You don't have permission"))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
     work_type_request.canceled = True
     work_type_request.approved = False
     work_info = EmployeeWorkInformation.objects.filter(
@@ -4025,6 +4076,8 @@ def work_type_request_cancel(request, id):
         redirect=reverse("work-type-request-view") + f"?id={work_type_request.id}",
         icon="close",
     )
+    if is_ajax:
+        return JsonResponse({"result": True})
     return handle_wtr_redirect(request, work_type_request)
 
 
@@ -4079,10 +4132,11 @@ def work_type_request_approve(request, id):
     This method is used to approve requested work type
     """
 
+    is_ajax = request.META.get("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest"
     work_type_request = WorkTypeRequest.find(id)
     if not work_type_request:
         messages.error(request, _("Work type request not found."))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
     if not (
         is_reportingmanger(request, work_type_request)
         or request.user.has_perm("approve_worktyperequest")
@@ -4090,7 +4144,7 @@ def work_type_request_approve(request, id):
         and not work_type_request.approved
     ):
         messages.error(request, _("You don't have permission"))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
     """
     Here the request will be approved, can send mail right here
     """
@@ -4110,11 +4164,15 @@ def work_type_request_approve(request, id):
             redirect=reverse("work-type-request-view") + f"?id={work_type_request.id}",
             icon="checkmark",
         )
+        if is_ajax:
+            return JsonResponse({"result": True})
     else:
         messages.error(
             request,
             _("An approved work type request already exists during this time period."),
         )
+        if is_ajax:
+            return JsonResponse({"result": False})
     return handle_wtr_redirect(request, work_type_request)
 
 
@@ -4852,10 +4910,11 @@ def shift_request_cancel(request, id):
 
     """
 
+    is_ajax = request.META.get("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest"
     shift_request = ShiftRequest.find(id)
     if not shift_request:
         messages.error(request, _("Shift request not found."))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
     if not (
         is_reportingmanger(request, shift_request)
         or request.user.has_perm("base.cancel_shiftrequest")
@@ -4863,7 +4922,7 @@ def shift_request_cancel(request, id):
         and shift_request.approved == False
     ):
         messages.error(request, _("You don't have permission"))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
     today_date = datetime.today().date()
     if (
         shift_request.approved
@@ -4913,7 +4972,7 @@ def shift_request_cancel(request, id):
             redirect=reverse("shift-request-view") + f"?id={shift_request.id}",
             icon="close",
         )
-    return HorillaRedirect(request)
+    return JsonResponse({"result": True}) if is_ajax else HorillaRedirect(request)
 
 
 @login_required
@@ -5027,10 +5086,11 @@ def shift_request_approve(request, id):
         id : shift request instance id
     """
 
+    is_ajax = request.META.get("HTTP_X_REQUESTED_WITH") == "XMLHttpRequest"
     shift_request = ShiftRequest.find(id)
     if not shift_request:
         messages.error(request, _("Shift request not found."))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
 
     user = request.user
     if not (
@@ -5040,14 +5100,14 @@ def shift_request_approve(request, id):
         and not shift_request.approved
     ):
         messages.error(request, _("You don't have permission"))
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
 
     if shift_request.is_any_request_exists():
         messages.error(
             request,
             _("An approved shift request already exists during this time period."),
         )
-        return HorillaRedirect(request)
+        return JsonResponse({"result": False}) if is_ajax else HorillaRedirect(request)
 
     today_date = datetime.today().date()
     if not shift_request.is_permanent_shift:
@@ -5085,7 +5145,7 @@ def shift_request_approve(request, id):
             icon="checkmark",
         )
 
-    return HorillaRedirect(request)
+    return JsonResponse({"result": True}) if is_ajax else HorillaRedirect(request)
 
 
 @login_required
@@ -5518,7 +5578,6 @@ def date_settings(request):
 
 @login_required
 @permission_required("base.change_company")
-@csrf_exempt  # Use this decorator if CSRF protection is enabled
 def save_date_format(request):
     if request.method == "POST":
         # Taking the selected Date Format
@@ -5617,7 +5676,6 @@ def get_date_format(request):
 
 @login_required
 @permission_required("base.change_company")
-@csrf_exempt  # Use this decorator if CSRF protection is enabled
 def save_time_format(request):
     if request.method == "POST":
         # Taking the selected Time Format
@@ -5728,6 +5786,8 @@ def history_field_settings(request):
             messages.success(request, _("Settings updated."))
             history_object.save()
 
+    if request.headers.get("HX-Request"):
+        return HttpResponse("")
     return redirect(general_settings)
 
 
@@ -7035,7 +7095,12 @@ def reorder_dashboard_charts(request):
 @login_required
 @permission_required("base.view_biometricattendance")
 def enable_biometric_attendance_view(request):
-    biometric = BiometricAttendance.objects.first()
+    selected_company = request.session.get("selected_company")
+    if selected_company == "all":
+        company = None
+    else:
+        company = Company.objects.filter(id=selected_company).first()
+    biometric = BiometricAttendance.objects.filter(company_id=company).first()
     return render(
         request,
         "base/install_biometric_attendance.html",
@@ -7048,9 +7113,14 @@ def enable_biometric_attendance_view(request):
 def activate_biometric_attendance(request):
     if request.method == "GET":
         is_installed = request.GET.get("is_installed")
-        instance = BiometricAttendance.objects.first()
-        if not instance:
-            instance = BiometricAttendance.objects.create()
+        selected_company = request.session.get("selected_company")
+        if selected_company == "all":
+            company = None
+        else:
+            company = Company.objects.filter(id=selected_company).first()
+        instance, created = BiometricAttendance.objects.get_or_create(
+            company_id=company
+        )
         if is_installed == "true":
             instance.is_installed = True
             messages.success(
@@ -7794,18 +7864,15 @@ def is_jwt_token_valid(auth_header):
 
 
 def protected_media(request, path):
-    public_pages = [
-        "/login",
-        "/forgot-password",
-        "/change-username",
-        "/change-password",
-        "/employee-reset-password",
-        "/recruitment/candidate-survey",
-        "/recruitment/open-recruitments",
-        "/recruitment/candidate-self-status-tracking",
-    ]
-
-    exempted_folders = ["base/icon/"]
+    # Media-path prefixes that are safe to serve without authentication.
+    # These are assets rendered on genuinely-public pages (login screen,
+    # open recruitments, candidate self-tracking) and contain no sensitive
+    # employee data. Do NOT add prefixes here without security review.
+    public_media_prefixes = (
+        "base/icon/",
+        "base/company/icon/",
+        "recruitment/candidate/profile/",
+    )
 
     # Prevent path traversal
     try:
@@ -7817,15 +7884,10 @@ def protected_media(request, path):
     if not os.path.exists(media_path) or not os.path.isfile(media_path):
         raise Http404("File not found")
 
-    referer_path = urlparse(request.META.get("HTTP_REFERER", "")).path
+    is_public_asset = any(path.startswith(prefix) for prefix in public_media_prefixes)
 
-    # Try Bearer token auth
-    jwt_user = is_jwt_token_valid(request.META.get("HTTP_AUTHORIZATION", ""))
-
-    # Access control logic
-    if referer_path not in public_pages and not any(
-        path.startswith(folder) for folder in exempted_folders
-    ):
+    if not is_public_asset:
+        jwt_user = is_jwt_token_valid(request.META.get("HTTP_AUTHORIZATION", ""))
         if not request.user.is_authenticated and not jwt_user:
             messages.error(
                 request,

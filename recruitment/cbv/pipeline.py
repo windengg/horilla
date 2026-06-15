@@ -54,7 +54,9 @@ class RecruitmentTabView(HorillaTabView):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        recruitments = self.filter_class(self.request.GET).qs.filter(is_active=True)
+        recruitments = self.filter_class(self.request.GET).qs.filter(
+            is_active=True, closed=False
+        )
         view_type = self.request.GET.get("view", "card")
         CACHE.set(
             self.request.session.session_key + "pipeline",
@@ -89,6 +91,7 @@ class RecruitmentTabView(HorillaTabView):
 
             self.query_params["view"] = view_type
             tab["badge_label"] = _("Stages")
+            tab["badge"] = rec.stage_set.filter(is_active=True).count()
             tab["actions"] = []
             if rec_manager_perm or change_perm:
                 if add_stage_perm or rec_manager_perm or change_perm:
@@ -245,6 +248,7 @@ class CandidateList(HorillaListView):
     quick_export = False
     next_prev = False
     show_filter_tags = True
+    filter_keys_to_remove = ["rec_id", "obj_id"]
     records_per_page = 10
     records_count_in_tab = False
 
@@ -290,10 +294,8 @@ class CandidateList(HorillaListView):
     ]
 
     row_attrs = """
-        hx-get='{get_details_candidate}'
-        data-toggle="oh-modal-toggle"
-        data-target="#genericModal"
-        hx-target="#genericModalBody"
+        class="cursor-pointer"
+        onclick="window.location.href = '{get_profile_url}?next=' + encodeURIComponent(window.location.pathname + window.location.search)"
     """
 
     actions = [
@@ -433,14 +435,11 @@ class CandidateCard(HorillaKanbanView):
     group_filter_class = filters.StageFilter
     group_key = "stage_id"
     records_per_page = 10
-    filter_keys_to_remove = ["rec_id"]
+    filter_keys_to_remove = ["rec_id", "obj_id"]
     group_label_key = "stage"
 
     kanban_attrs = """
-        hx-get='{get_details_candidate}'
-        data-toggle="oh-modal-toggle"
-        data-target="#genericModal"
-        hx-target="#genericModalBody"
+        onclick="window.location.href = '{get_profile_url}?next=' + encodeURIComponent(window.location.pathname + window.location.search)"
     """
 
     details = {
@@ -455,10 +454,10 @@ class CandidateCard(HorillaKanbanView):
             "action": _("Add Candidate"),
             "accessibility": "recruitment.accessibility.add_candidate_accessibility",
             "attrs": """
-                hx-target="#genericModalBody"
+                hx-target="#objectCreateModalTarget"
                 hx-get="{get_add_candidate_url}"
                 data-toggle="oh-modal-toggle"
-                data-target="#genericModal"
+                data-target="#objectCreateModal"
             """,
         },
         {
@@ -637,11 +636,13 @@ class PipelineNav(HorillaNavView):
         else:
             self.create_attrs = None
 
+        rec_id = self.request.GET.get("obj_id", "")
+        id_suffix = f"&obj_id={rec_id}" if rec_id else ""
         self.view_types = [
             {
                 "type": "list",
                 "icon": "list-outline",
-                "url": f'{reverse_lazy("cbv-pipeline-tab")}?view=list',
+                "url": f'{reverse_lazy("cbv-pipeline-tab")}?view=list{id_suffix}',
                 "attrs": f"""
                     title ='List'
                 """,
@@ -649,7 +650,7 @@ class PipelineNav(HorillaNavView):
             {
                 "type": "card",
                 "icon": "grid-outline",
-                "url": f'{reverse_lazy("cbv-pipeline-tab")}?view=card',
+                "url": f'{reverse_lazy("cbv-pipeline-tab")}?view=card{id_suffix}',
                 "attrs": f"""
                     title ='Card'
                 """,

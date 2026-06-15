@@ -40,6 +40,7 @@ from base.methods import (
 from base.models import Company
 from employee.models import Employee, EmployeeWorkInformation
 from horilla.decorators import (
+    handle_no_permission,
     hx_request_required,
     login_required,
     owner_can_enter,
@@ -130,6 +131,7 @@ def payroll_calculation(employee, start_date, end_date):
     contract_wage = basic_pay_details["contract_wage"]
     basic_pay = basic_pay_details["basic_pay"]
     loss_of_pay = basic_pay_details["loss_of_pay"]
+    custom_leave_deduction = basic_pay_details.get("custom_leave_deduction", 0.0)
     paid_days = basic_pay_details["paid_days"]
     unpaid_days = basic_pay_details["unpaid_days"]
 
@@ -244,6 +246,7 @@ def payroll_calculation(employee, start_date, end_date):
         "net_deductions": net_pay_deduction_list,
         "total_deductions": total_deductions,
         "loss_of_pay": loss_of_pay,
+        "custom_leave_deduction": custom_leave_deduction,
         "federal_tax": federal_tax,
         "start_date": start_date,
         "end_date": end_date,
@@ -272,9 +275,16 @@ def allowances_deductions_tab(request, emp_id):
     condition-based rules. The results are then rendered in the allowance and
     deduction tab template.
     """
+    user = request.user
     employee_deductions = []
     employee_allowances = []
     employee = Employee.objects.get(id=emp_id)
+    if getattr(user, "employee_get", None) != employee and not (
+        user.has_perm("payroll.view_allowance")
+        and user.has_perm("payroll.view_deduction")
+    ):
+        return handle_no_permission(request)
+
     active_contracts = employee.contract_set.filter(contract_status="active").first()
     basic_pay = active_contracts.wage if active_contracts else None
     if basic_pay:
@@ -388,15 +398,32 @@ def create_allowance(request):
     This method is used to create allowance condition template
     """
     form = forms.AllowanceForm()
+    is_htmx = request.headers.get("HX-Request") is not None
     if request.method == "POST":
         form = forms.AllowanceForm(request.POST)
         if form.is_valid():
             form.save()
             form = forms.AllowanceForm()
             messages.success(request, _("Allowance created."))
-            # return redirect(view_allowance)
+            if is_htmx:
+                response = HttpResponse("", status=200)
+                response["HX-Trigger"] = json.dumps(
+                    {"reloadPayrollAllowances": {"target": "body"}}
+                )
+                return response
             return redirect(reverse("view-allowance"))
-    return render(request, "payroll/common/form.html", {"form": form})
+    template_name = (
+        "payroll/common/form_fragment.html" if is_htmx else "payroll/common/form.html"
+    )
+    return render(
+        request,
+        template_name,
+        {
+            "form": form,
+            "post_url": request.get_full_path(),
+            "back_url": reverse("allowances-list-view"),
+        },
+    )
 
 
 @login_required
@@ -489,6 +516,7 @@ def update_allowance(request, allowance_id, **kwargs):
         id : allowance instance id
     """
     instance = Allowance.find(allowance_id)
+    is_htmx = request.headers.get("HX-Request") is not None
     if not instance:
         return HorillaRedirect(request, message=_("Allowance not found."))
     form = forms.AllowanceForm(instance=instance)
@@ -497,8 +525,25 @@ def update_allowance(request, allowance_id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Allowance updated."))
+            if is_htmx:
+                response = HttpResponse("", status=200)
+                response["HX-Trigger"] = json.dumps(
+                    {"reloadPayrollAllowances": {"target": "body"}}
+                )
+                return response
             return redirect(reverse("view-allowance"))
-    return render(request, "payroll/common/form.html", {"form": form})
+    template_name = (
+        "payroll/common/form_fragment.html" if is_htmx else "payroll/common/form.html"
+    )
+    return render(
+        request,
+        template_name,
+        {
+            "form": form,
+            "post_url": request.get_full_path(),
+            "back_url": reverse("allowances-list-view"),
+        },
+    )
 
 
 # @login_required
@@ -594,14 +639,31 @@ def create_deduction(request):
     This method is used to create deduction
     """
     form = forms.DeductionForm()
+    is_htmx = request.headers.get("HX-Request") is not None
     if request.method == "POST":
         form = forms.DeductionForm(request.POST)
         if form.is_valid():
             form.save()
             messages.success(request, _("Deduction created."))
-            # return redirect(view_deduction)
+            if is_htmx:
+                response = HttpResponse("", status=200)
+                response["HX-Trigger"] = json.dumps(
+                    {"reloadPayrollDeductions": {"target": "body"}}
+                )
+                return response
             return redirect(reverse("view-deduction"))
-    return render(request, "payroll/common/form.html", {"form": form})
+    template_name = (
+        "payroll/common/form_fragment.html" if is_htmx else "payroll/common/form.html"
+    )
+    return render(
+        request,
+        template_name,
+        {
+            "form": form,
+            "post_url": request.get_full_path(),
+            "back_url": reverse("deduction-view-list"),
+        },
+    )
 
 
 @login_required
@@ -717,6 +779,7 @@ def update_deduction(request, deduction_id, **kwargs):
     This method is used to update the deduction instance
     """
     instance = Deduction.find(deduction_id)
+    is_htmx = request.headers.get("HX-Request") is not None
     if not instance:
         return HorillaRedirect(request, message=_("Deduction not found."))
     form = forms.DeductionForm(instance=instance)
@@ -725,8 +788,25 @@ def update_deduction(request, deduction_id, **kwargs):
         if form.is_valid():
             form.save()
             messages.success(request, _("Deduction updated."))
+            if is_htmx:
+                response = HttpResponse("", status=200)
+                response["HX-Trigger"] = json.dumps(
+                    {"reloadPayrollDeductions": {"target": "body"}}
+                )
+                return response
             return redirect(reverse("view-deduction"))
-    return render(request, "payroll/common/form.html", {"form": form})
+    template_name = (
+        "payroll/common/form_fragment.html" if is_htmx else "payroll/common/form.html"
+    )
+    return render(
+        request,
+        template_name,
+        {
+            "form": form,
+            "post_url": request.get_full_path(),
+            "back_url": reverse("deduction-view-list"),
+        },
+    )
 
 
 @login_required
@@ -1555,7 +1635,12 @@ def delete_loan(request):
             messages.success(request, "Loan account deleted")
         else:
             messages.error(request, "Loan account cannot be deleted")
-    # return redirect(view_loans)
+    if request.headers.get("HX-Request"):
+        response = HttpResponse("", status=200)
+        response["HX-Trigger"] = json.dumps(
+            {"reloadPayrollLoanTabs": {"target": "body"}}
+        )
+        return response
     return redirect(reverse("view-loan"))
 
 
@@ -1910,6 +1995,12 @@ def approve_reimbursements(request):
                 redirect=reverse("view-reimbursement") + f"?id={reimbursement.id}",
                 icon="checkmark",
             )
+    if request.headers.get("HX-Request"):
+        response = HttpResponse("", status=200)
+        response["HX-Trigger"] = json.dumps(
+            {"reloadPayrollReimbursements": {"target": "body"}}
+        )
+        return response
     return redirect(reverse("view-reimbursement"))
 
 
@@ -1920,22 +2011,37 @@ def delete_reimbursements(request):
     This method is used to delete the reimbursements
     """
     ids = request.GET.getlist("ids")
-    reimbursements = Reimbursement.objects.filter(id__in=ids)
-    user = list(reimbursements.values_list("employee_id__employee_user_id", flat=True))
+    reimbursements = Reimbursement.objects.filter(id__in=ids).select_related(
+        "employee_id__employee_user_id"
+    )
+    recipients = []
+    seen_user_ids = set()
+    for reimbursement in reimbursements:
+        recipient = getattr(reimbursement.employee_id, "employee_user_id", None)
+        if recipient and recipient.id not in seen_user_ids:
+            recipients.append(recipient)
+            seen_user_ids.add(recipient.id)
     reimbursements.delete()
     messages.success(request, "Reimbursements deleted")
-    notify.send(
-        request.user.employee_get,
-        recipient=user,
-        verb="Your reimbursement request has been deleted.",
-        verb_ar="تم حذف طلب استرداد نفقاتك.",
-        verb_de="Ihr Rückerstattungsantrag wurde gelöscht.",
-        verb_es="Tu solicitud de reembolso ha sido eliminada.",
-        verb_fr="Votre demande de remboursement a été supprimée.",
-        redirect="/",
-        icon="trash",
-    )
+    if recipients:
+        notify.send(
+            request.user.employee_get,
+            recipient=recipients,
+            verb="Your reimbursement request has been deleted.",
+            verb_ar="تم حذف طلب استرداد نفقاتك.",
+            verb_de="Ihr Rückerstattungsantrag wurde gelöscht.",
+            verb_es="Tu solicitud de reembolso ha sido eliminada.",
+            verb_fr="Votre demande de remboursement a été supprimée.",
+            redirect="/",
+            icon="trash",
+        )
 
+    if request.headers.get("HX-Request"):
+        response = HttpResponse("", status=200)
+        response["HX-Trigger"] = json.dumps(
+            {"reloadPayrollReimbursements": {"target": "body"}}
+        )
+        return response
     return redirect("view-reimbursement")
 
 

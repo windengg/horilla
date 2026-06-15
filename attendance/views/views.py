@@ -456,6 +456,21 @@ def attendance_update(request, obj_id):
     )
 
 
+def attendance_view_redirect(request):
+    """
+    Full page redirect for normal navigation; for HTMX requests (attendance-view),
+    trigger a client-side refresh of the list container without reloading the page.
+    """
+    if request.META.get("HTTP_HX_REQUEST"):
+        response = HttpResponse("", status=200)
+        # Fire on document body so handlers run even if the initiating node is swapped/removed (hx-swap=none).
+        response["HX-Trigger"] = json.dumps(
+            {"reloadAttendanceView": {"target": "body"}}
+        )
+        return response
+    return HorillaRedirect(request)
+
+
 @login_required
 @permission_required("attendance.delete_attendance")
 @require_http_methods(["POST"])
@@ -501,7 +516,7 @@ def attendance_delete(request, obj_id):
             )
     except (Attendance.DoesNotExist, OverflowError):
         messages.error(request, _("Attendance Does not exists.."))
-    return HorillaRedirect(request)
+    return attendance_view_redirect(request)
 
 
 @login_required
@@ -1426,7 +1441,7 @@ def validate_this_attendance(request, obj_id):
         if not request.user.is_superuser:
             if attendance.employee_id.id == request.user.employee_get.id:
                 messages.error(request, _("You cannot validate your own attendance."))
-                return HorillaRedirect(request)
+                return attendance_view_redirect(request)
         attendance.attendance_validated = True
         # Recalculate worked hours from attendance activities before validation
         # to ensure Hours Account reflects actual worked time.
@@ -1463,7 +1478,7 @@ def validate_this_attendance(request, obj_id):
     except (Attendance.DoesNotExist, ValueError):
         messages.error(request, _("Attendance not found"))
 
-    return HorillaRedirect(request)
+    return attendance_view_redirect(request)
 
 
 @login_required
@@ -1510,6 +1525,7 @@ def revalidate_this_attendance(request, obj_id):
 
 @login_required
 @manager_can_enter("attendance.change_attendance")
+@require_http_methods(["GET", "POST"])
 def approve_overtime(request, obj_id):
     """
     This method is used to approve attendance overtime
@@ -1521,7 +1537,7 @@ def approve_overtime(request, obj_id):
         if not request.user.is_superuser:
             if attendance.employee_id.id == request.user.employee_get.id:
                 messages.error(request, _("You cannot approve your own overtime."))
-                return HorillaRedirect(request)
+                return attendance_view_redirect(request)
         attendance.attendance_overtime_approve = True
         attendance.save()
         urlencode = request.GET.urlencode()
@@ -1549,7 +1565,7 @@ def approve_overtime(request, obj_id):
             )
     except (Attendance.DoesNotExist, OverflowError):
         messages.error(request, _("Attendance not found"))
-    return HorillaRedirect(request)
+    return attendance_view_redirect(request)
 
 
 @login_required
@@ -2813,9 +2829,20 @@ def track_late_come_early_out(request):
     """
     Renders the form to track late arrivals and early departures in attendance.
     """
-    tracking = TrackLateComeEarlyOut.objects.first()
+    selected_company = request.session.get("selected_company")
+    if selected_company == "all":
+        company = None
+    else:
+        from base.models import Company
+
+        company = Company.objects.filter(id=selected_company).first()
+    tracking = TrackLateComeEarlyOut.objects.filter(company_id=company).first()
     form = TrackLateComeEarlyOutForm(
-        initial={"is_enable": tracking.is_enable} if tracking else {}
+        initial=(
+            {"is_enable": tracking.is_enable, "company_id": company}
+            if tracking
+            else {"company_id": company}
+        )
     )
     return render(
         request, "attendance/late_come_early_out/tracking.html", {"form": form}
@@ -2829,8 +2856,18 @@ def enable_disable_tracking_late_come_early_out(request):
     Enables or disables the tracking of late arrivals and early departures in attendance.
     """
     if request.method == "POST":
+        from base.models import Company
+
         enable = bool(request.POST.get("is_enable"))
-        tracking, created = TrackLateComeEarlyOut.objects.get_or_create()
+        selected_company = request.session.get("selected_company")
+        if selected_company == "all":
+            company = None
+        else:
+            company = Company.objects.filter(id=selected_company).first()
+
+        tracking, created = TrackLateComeEarlyOut.objects.get_or_create(
+            company_id=company
+        )
         tracking.is_enable = enable
         tracking.save()
         message = _("enabled") if enable else _("disabled")
@@ -2888,7 +2925,7 @@ def grace_time_view(request):
     """
     condition = AttendanceValidationCondition.objects.first()
     default_grace_time = GraceTime.objects.filter(is_default=True).first()
-    grace_times = GraceTime.objects.all().exclude(is_default=True)
+    grace_times = GraceTime.objects.entire().exclude(is_default=True)
     return render(
         request,
         "attendance/grace_time/grace_time.html",
